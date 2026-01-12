@@ -102,8 +102,10 @@ class RateLimiter:
             # Record this call
             self.calls.append(time.time())
 
-# Global rate limiter (12 calls per minute - safe for free tier)
-rate_limiter = RateLimiter(max_calls_per_minute=12)
+# Global rate limiter (50 calls per minute - allows parallel processing)
+# Gemini 1.5 Flash free tier: 15 RPM, 1500 RPD, 1 million TPM
+# Setting to 50 allows burst processing but will throttle if needed
+rate_limiter = RateLimiter(max_calls_per_minute=50)
 
 # Global storage for processed invoices with disk persistence
 processed_invoices = {}
@@ -316,7 +318,7 @@ def process_single_invoice(image, source_file, page_num, schema):
         return None
 
 
-def process_file_parallel(file_path, filename, schema, max_workers=8):
+def process_file_parallel(file_path, filename, schema, max_workers=5):
     """Process file with multi-threading"""
     results = []
 
