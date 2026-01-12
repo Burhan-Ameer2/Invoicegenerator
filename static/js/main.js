@@ -27,9 +27,11 @@ function initializeEventListeners() {
     uploadZone.addEventListener('dragleave', handleDragLeave);
     uploadZone.addEventListener('drop', handleDrop);
 
-    // Click to browse files
+    // Click to browse files (prevent recursion)
     $('#uploadZone').on('click', (e) => {
-        if (e.target.tagName !== 'BUTTON') $('#fileInput').click();
+        if (e.target.id !== 'fileInput' && e.target.tagName !== 'BUTTON') {
+            $('#fileInput').trigger('click');
+        }
     });
 
     // Buttons
@@ -197,13 +199,14 @@ function processFiles() {
             return xhr;
         },
         success: function (response) {
-            if (response.success) {
+            if (response?.success && response.session_id) {
                 currentSessionId = response.session_id;
-                totalInvoices = response.total_invoices;
+                totalInvoices = response.total_invoices || 0;
                 updateProgress(100, totalInvoices, totalInvoices, 'Processing complete!');
-                setTimeout(() => loadInvoices(response.session_id), 800);
+                setTimeout(() => loadInvoices(currentSessionId), 800);
             } else {
-                showAlert('danger', 'Processing failed: ' + response.error);
+                const msg = response?.error || 'Processing failed.';
+                showAlert('danger', msg);
                 $('#progressSection').hide();
                 $('#processBtn').prop('disabled', false);
             }
@@ -221,22 +224,40 @@ function processFiles() {
 // Load & Display Invoices
 // ======================
 function loadInvoices(sessionId) {
+    if (!sessionId) {
+        showAlert('danger', 'Session ID not found. Please try again.');
+        return;
+    }
+
     $.ajax({
         url: `/get_invoices/${sessionId}`,
         type: 'GET',
         success: function (response) {
-            if (response.success) {
-                displayInvoices(response.invoices);
+            if (response?.success) {
+                displayInvoices(response.invoices || []);
                 $('#progressSection').hide();
                 $('#resultsSection').show().addClass('fade-in');
+            } else {
+                const msg = response?.error || 'Failed to load invoices.';
+                showAlert('danger', msg);
             }
         },
-        error: function () {
-            showAlert('danger', 'Failed to load invoices.');
+        error: function (xhr) {
+            let message = 'Failed to load invoices.';
+            try {
+                const json = JSON.parse(xhr.responseText);
+                message = json.error || message;
+            } catch (e) {
+                message = xhr.statusText || message;
+            }
+            showAlert('danger', message);
         },
     });
 }
 
+// ======================
+// Display Invoices in Table
+// ======================
 function displayInvoices(invoices) {
     $('#invoiceCount').text(invoices.length);
 
@@ -247,43 +268,59 @@ function displayInvoices(invoices) {
 
     invoices.forEach((invoice, index) => {
         let row = '<tr>';
-        row += `<td>${invoice.Source_File ?? '-'}</td>`;
-        row += `<td>${invoice.Page_Number ?? '-'}</td>`;
+        row += `<td>${invoice.Source_File || ''}</td>`;
+        row += `<td>${invoice.Page_Number || ''}</td>`;
 
         const schemaFields = [
-            'Invoice_Date', 'Invoice_No', 'Supplier_Name', 'Supplier_NTN', 'Supplier_GST_No', 'Supplier_Registration_No',
-            'Buyer_Name', 'Buyer_NTN', 'Buyer_GST_No', 'Buyer_Registration_No',
-            'Exclusive_Value', 'GST_Sales_Tax', 'Inclusive_Value', 'Advance_Tax', 'Net_Amount'
+            'Invoice_Date',
+            'Invoice_No',
+            'Supplier_Name',
+            'Supplier_NTN',
+            'Supplier_GST_No',
+            'Supplier_Registration_No',
+            'Buyer_Name',
+            'Buyer_NTN',
+            'Buyer_GST_No',
+            'Buyer_Registration_No',
+            'Exclusive_Value',
+            'GST_Sales_Tax',
+            'Inclusive_Value',
+            'Advance_Tax',
+            'Net_Amount',
         ];
 
         schemaFields.forEach((field) => {
-            const value = invoice[field] ?? '-';
+            const value = invoice[field] || '-';
             row += `<td>${value}</td>`;
         });
 
-        row += `<td><button class="px-4 py-2 bg-brand-red text-white rounded-lg hover:bg-promo-red text-sm font-semibold transition shadow-md" onclick="viewInvoice(${index})"><i class="fas fa-eye mr-1"></i>View</button></td>`;
+        row += `<td>
+            <button class="px-4 py-2 bg-brand-red text-white rounded-lg hover:bg-promo-red text-sm font-semibold transition shadow-md" onclick="viewInvoice(${index})">
+                <i class="fas fa-eye mr-1"></i>View
+            </button>
+        </td>`;
         row += '</tr>';
 
         tableBody.append(row);
     });
 
-    // Initialize DataTable safely
     dataTable = $('#invoicesTable').DataTable({
         pageLength: 10,
-        lengthMenu: [[10, 25, 50, -1], [10, 25, 50, 'All']],
+        lengthMenu: [
+            [10, 25, 50, -1],
+            [10, 25, 50, 'All'],
+        ],
         order: [[0, 'asc']],
-        deferRender: true,
-        destroy: true,
         language: {
-            search: "_INPUT_",
-            searchPlaceholder: "Search invoices..."
+            search: '_INPUT_',
+            searchPlaceholder: 'Search invoices...',
         },
-        columnDefs: [{ targets: '_all', className: 'text-nowrap' }]
+        columnDefs: [{ targets: '_all', className: 'text-nowrap' }],
     });
 }
 
 // ======================
-// View Invoice Modal
+// View Single Invoice Modal
 // ======================
 function viewInvoice(index) {
     if (!currentSessionId) return;
@@ -293,7 +330,8 @@ function viewInvoice(index) {
         url: `/get_invoice_image/${currentSessionId}/${index}`,
         type: 'GET',
         success: function (response) {
-            if (response.success) showInvoiceModal(response, index);
+            if (response?.success) showInvoiceModal(response, index);
+            else showAlert('danger', response?.error || 'Failed to load invoice.');
         },
         error: function () {
             showAlert('danger', 'Failed to load invoice details.');
@@ -302,16 +340,16 @@ function viewInvoice(index) {
 }
 
 function showInvoiceModal(invoiceData, index) {
-    $('#modalRowNumber').text(`Row ${index + 1}`);
+    $('#modalRowNumber').text(`Row ${index}`);
     $('#modalInvoiceImage').attr('src', `data:image/png;base64,${invoiceData.image}`);
 
     const dataContainer = $('#modalInvoiceData');
     dataContainer.empty();
 
-    const data = invoiceData.data;
+    const data = invoiceData.data || {};
     for (let key in data) {
         if (key !== '_image_base64' && key !== 'row_id') {
-            const value = data[key] ?? '-';
+            const value = data[key] || '-';
             const label = key.replace(/_/g, ' ');
             const fieldHtml = `
                 <div class="bg-white rounded-lg p-3 border-l-4 border-brand-red shadow-sm">
@@ -351,7 +389,10 @@ function showNextInvoice() {
 // Export & Reset
 // ======================
 function exportToExcel() {
-    if (!currentSessionId) return;
+    if (!currentSessionId) {
+        showAlert('danger', 'No session to export.');
+        return;
+    }
     window.location.href = `/export/${currentSessionId}`;
 }
 
@@ -394,10 +435,17 @@ function showAlert(type, message) {
             ? 'bg-yellow-100 text-yellow-800 border-yellow-300'
             : 'bg-green-100 text-green-800 border-green-300';
 
+    const iconClass =
+        type === 'danger'
+            ? 'exclamation-circle'
+            : type === 'warning'
+            ? 'exclamation-triangle'
+            : 'check-circle';
+
     const alert = $(`
         <div class="fixed top-4 right-4 ${alertClass} border-2 px-6 py-4 rounded-lg shadow-lg z-50 max-w-md animate-fade-in">
             <div class="flex items-center gap-3">
-                <i class="fas fa-${type === 'danger' ? 'exclamation-circle' : type === 'warning' ? 'exclamation-triangle' : 'check-circle'} text-xl"></i>
+                <i class="fas fa-${iconClass} text-xl"></i>
                 <p class="font-semibold">${message}</p>
                 <button onclick="this.parentElement.parentElement.remove()" class="ml-4 text-xl font-bold opacity-50 hover:opacity-100">×</button>
             </div>
