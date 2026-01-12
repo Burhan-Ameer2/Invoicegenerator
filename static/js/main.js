@@ -199,7 +199,19 @@ function processFiles() {
         },
         error: function(xhr, status, error) {
             console.error('Upload error:', error);
-            showAlert('danger', 'Upload failed. Please try again.');
+
+            // Check if it's a limit error
+            if (xhr.responseJSON && xhr.responseJSON.error) {
+                const errorMsg = xhr.responseJSON.error;
+                if (errorMsg.includes('limit exceeded')) {
+                    showAlert('warning', errorMsg);
+                } else {
+                    showAlert('danger', errorMsg);
+                }
+            } else {
+                showAlert('danger', 'Upload failed. Please try again.');
+            }
+
             $('#progressSection').hide();
             $('#processBtn').prop('disabled', false);
         }

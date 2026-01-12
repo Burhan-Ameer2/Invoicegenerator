@@ -63,10 +63,17 @@
 
         <!-- Upload Card -->
         <div class="bg-white rounded-xl shadow-md p-6">
-            <h2 class="text-lg font-bold mb-4 flex items-center gap-2 text-brand-red">
-                <i class="fas fa-upload"></i>
-                Upload Invoices
-            </h2>
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-lg font-bold flex items-center gap-2 text-brand-red">
+                    <i class="fas fa-upload"></i>
+                    Upload Invoices
+                </h2>
+                {% if max_invoices > 0 %}
+                <span class="bg-promo-red text-white px-3 py-1 rounded-lg text-xs font-semibold">
+                    Limit: {{ max_invoices }} invoices
+                </span>
+                {% endif %}
+            </div>
 
             <div id="uploadZone"
                  class="border-2 border-dashed border-red-300 rounded-lg p-8 text-center cursor-pointer hover:bg-red-50 transition">
