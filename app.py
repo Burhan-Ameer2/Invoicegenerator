@@ -16,6 +16,8 @@ import time
 import threading
 from collections import deque
 import uuid
+import pickle
+from pathlib import Path
 
 # Load environment variables
 load_dotenv()
@@ -32,6 +34,12 @@ app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'your-secret-key-change-in-production')
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
 app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['SESSION_FOLDER'] = 'sessions'
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+
+# Increase timeouts for production
+import socket
+socket.setdefaulttimeout(300)  # 5 minutes timeout
 
 # Configure Gemini API
 api_key = os.getenv('GEMINI_API_KEY')
@@ -97,8 +105,53 @@ class RateLimiter:
 # Global rate limiter (12 calls per minute - safe for free tier)
 rate_limiter = RateLimiter(max_calls_per_minute=12)
 
-# Global storage for processed invoices (in production, use a database)
+# Global storage for processed invoices with disk persistence
 processed_invoices = {}
+processed_invoices_lock = threading.Lock()
+
+def save_session_to_disk(session_id, data):
+    """Save session data to disk for persistence"""
+    try:
+        session_dir = Path(app.config['SESSION_FOLDER'])
+        session_dir.mkdir(exist_ok=True)
+        session_file = session_dir / f"{session_id}.pkl"
+        with open(session_file, 'wb') as f:
+            pickle.dump(data, f)
+        logger.info(f"Session {session_id} saved to disk")
+    except Exception as e:
+        logger.error(f"Failed to save session {session_id}: {str(e)}")
+
+def load_session_from_disk(session_id):
+    """Load session data from disk"""
+    try:
+        session_file = Path(app.config['SESSION_FOLDER']) / f"{session_id}.pkl"
+        if session_file.exists():
+            with open(session_file, 'rb') as f:
+                data = pickle.load(f)
+            logger.info(f"Session {session_id} loaded from disk")
+            return data
+        return None
+    except Exception as e:
+        logger.error(f"Failed to load session {session_id}: {str(e)}")
+        return None
+
+def get_session_data(session_id):
+    """Get session data from memory or disk"""
+    with processed_invoices_lock:
+        # Try memory first
+        if session_id in processed_invoices:
+            logger.info(f"Session {session_id} found in memory")
+            return processed_invoices[session_id]
+        
+        # Try disk
+        data = load_session_from_disk(session_id)
+        if data:
+            # Cache in memory
+            processed_invoices[session_id] = data
+            return data
+        
+        logger.warning(f"Session {session_id} not found in memory or disk")
+        return None
 
 
 def pdf_to_images(pdf_bytes):
@@ -386,8 +439,14 @@ def upload_files():
                 except:
                     pass
 
-        # Store results in global storage (use database in production)
-        processed_invoices[session_id] = all_results
+        # Store results in memory and disk
+        with processed_invoices_lock:
+            processed_invoices[session_id] = all_results
+        
+        # Save to disk for persistence
+        save_session_to_disk(session_id, all_results)
+        
+        logger.info(f"Session {session_id}: Processed {len(all_results)} invoices successfully")
 
         return jsonify({
             'success': True,
@@ -404,10 +463,12 @@ def upload_files():
 @app.route('/get_invoices/<session_id>')
 def get_invoices(session_id):
     """Get processed invoices for a session"""
-    if session_id not in processed_invoices:
+    logger.info(f"Fetching invoices for session: {session_id}")
+    
+    invoices = get_session_data(session_id)
+    if invoices is None:
+        logger.error(f"Session not found: {session_id}")
         return jsonify({'error': 'Session not found'}), 404
-
-    invoices = processed_invoices[session_id]
 
     # Prepare data for frontend (without base64 images for the table)
     table_data = []
@@ -426,10 +487,12 @@ def get_invoices(session_id):
 @app.route('/get_invoice_image/<session_id>/<int:invoice_id>')
 def get_invoice_image(session_id, invoice_id):
     """Get invoice image and data for modal"""
-    if session_id not in processed_invoices:
+    logger.info(f"Fetching invoice image for session: {session_id}, invoice: {invoice_id}")
+    
+    invoices = get_session_data(session_id)
+    if invoices is None:
+        logger.error(f"Session not found: {session_id}")
         return jsonify({'error': 'Session not found'}), 404
-
-    invoices = processed_invoices[session_id]
 
     if invoice_id < 0 or invoice_id >= len(invoices):
         return jsonify({'error': 'Invoice not found'}), 404
@@ -446,10 +509,12 @@ def get_invoice_image(session_id, invoice_id):
 @app.route('/export/<session_id>')
 def export_excel(session_id):
     """Export invoices to Excel"""
-    if session_id not in processed_invoices:
+    logger.info(f"Exporting session: {session_id}")
+    
+    invoices = get_session_data(session_id)
+    if invoices is None:
+        logger.error(f"Session not found: {session_id}")
         return jsonify({'error': 'Session not found'}), 404
-
-    invoices = processed_invoices[session_id]
 
     # Prepare DataFrame
     df_data = []
@@ -480,9 +545,15 @@ def export_excel(session_id):
 
 
 if __name__ == '__main__':
-    # Create upload folder if it doesn't exist
+    # Create folders if they don't exist
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+    os.makedirs(app.config['SESSION_FOLDER'], exist_ok=True)
 
     # Run app
     port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
+    
+    logger.info(f"Starting server on port {port}")
+    logger.info(f"Debug mode: {debug_mode}")
+    
+    app.run(host='0.0.0.0', port=port, debug=debug_mode, threaded=True)
