@@ -247,29 +247,17 @@ function displayInvoices(invoices) {
 
     invoices.forEach((invoice, index) => {
         let row = '<tr>';
-        row += `<td>${invoice.Source_File || ''}</td>`;
-        row += `<td>${invoice.Page_Number || ''}</td>`;
+        row += `<td>${invoice.Source_File ?? '-'}</td>`;
+        row += `<td>${invoice.Page_Number ?? '-'}</td>`;
 
         const schemaFields = [
-            'Invoice_Date',
-            'Invoice_No',
-            'Supplier_Name',
-            'Supplier_NTN',
-            'Supplier_GST_No',
-            'Supplier_Registration_No',
-            'Buyer_Name',
-            'Buyer_NTN',
-            'Buyer_GST_No',
-            'Buyer_Registration_No',
-            'Exclusive_Value',
-            'GST_Sales_Tax',
-            'Inclusive_Value',
-            'Advance_Tax',
-            'Net_Amount',
+            'Invoice_Date', 'Invoice_No', 'Supplier_Name', 'Supplier_NTN', 'Supplier_GST_No', 'Supplier_Registration_No',
+            'Buyer_Name', 'Buyer_NTN', 'Buyer_GST_No', 'Buyer_Registration_No',
+            'Exclusive_Value', 'GST_Sales_Tax', 'Inclusive_Value', 'Advance_Tax', 'Net_Amount'
         ];
 
         schemaFields.forEach((field) => {
-            const value = invoice[field] || '-';
+            const value = invoice[field] ?? '-';
             row += `<td>${value}</td>`;
         });
 
@@ -279,23 +267,23 @@ function displayInvoices(invoices) {
         tableBody.append(row);
     });
 
+    // Initialize DataTable safely
     dataTable = $('#invoicesTable').DataTable({
         pageLength: 10,
-        lengthMenu: [
-            [10, 25, 50, -1],
-            [10, 25, 50, 'All'],
-        ],
+        lengthMenu: [[10, 25, 50, -1], [10, 25, 50, 'All']],
         order: [[0, 'asc']],
+        deferRender: true,
+        destroy: true,
         language: {
-            search: '_INPUT_',
-            searchPlaceholder: 'Search invoices...',
+            search: "_INPUT_",
+            searchPlaceholder: "Search invoices..."
         },
-        columnDefs: [{ targets: '_all', className: 'text-nowrap' }],
+        columnDefs: [{ targets: '_all', className: 'text-nowrap' }]
     });
 }
 
 // ======================
-// View Single Invoice Modal
+// View Invoice Modal
 // ======================
 function viewInvoice(index) {
     if (!currentSessionId) return;
@@ -314,7 +302,7 @@ function viewInvoice(index) {
 }
 
 function showInvoiceModal(invoiceData, index) {
-    $('#modalRowNumber').text(`Row ${index}`);
+    $('#modalRowNumber').text(`Row ${index + 1}`);
     $('#modalInvoiceImage').attr('src', `data:image/png;base64,${invoiceData.image}`);
 
     const dataContainer = $('#modalInvoiceData');
@@ -323,7 +311,7 @@ function showInvoiceModal(invoiceData, index) {
     const data = invoiceData.data;
     for (let key in data) {
         if (key !== '_image_base64' && key !== 'row_id') {
-            const value = data[key] || '-';
+            const value = data[key] ?? '-';
             const label = key.replace(/_/g, ' ');
             const fieldHtml = `
                 <div class="bg-white rounded-lg p-3 border-l-4 border-brand-red shadow-sm">
