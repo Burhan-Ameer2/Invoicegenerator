@@ -1,20 +1,19 @@
-# Use Python 3.10 slim image
-FROM python:3.10-slim
+# Use Python 3.11 slim image
+FROM python:3.11-slim
 
 # Set working directory
 WORKDIR /app
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PORT=5000
+    PYTHONDONTWRITEBYTECODE=1
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first (for better caching)
+# Copy requirements first
 COPY requirements.txt .
 
 # Install Python dependencies
@@ -26,12 +25,12 @@ COPY . .
 # Create uploads directory
 RUN mkdir -p uploads
 
-# Expose port
-EXPOSE 5000
+# Expose port (Koyeb will override with $PORT)
+EXPOSE 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:5000/', timeout=5)" || exit 1
+    CMD python -c "import os, requests; requests.get(f'http://localhost:{os.environ.get(\"PORT\",8080)}/', timeout=5)" || exit 1
 
-# Run the application with gunicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "4", "--timeout", "300", "app:app"]
+# Run the application with Gunicorn using dynamic PORT
+CMD sh -c 'gunicorn --bind 0.0.0.0:$PORT --workers 4 --timeout 300 app:app'
