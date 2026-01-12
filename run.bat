@@ -1,3 +1,0 @@
-@echo off
-echo Starting Invoice Data Extractor...
-streamlit run app.py
