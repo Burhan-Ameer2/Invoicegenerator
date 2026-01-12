@@ -181,7 +181,12 @@ def extract_invoice_data_with_gemini(image, schema, max_retries=3):
                 "data": img_base64
             }
 
-            response = model.generate_content([prompt, image_part])
+            response = model.generate_content(
+                [prompt, image_part],
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0,
+                )
+            )
 
             if not response or not response.text:
                 raise Exception("EMPTY_RESPONSE")
