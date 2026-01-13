@@ -53,7 +53,6 @@ else:
 MAX_INVOICES_PER_SESSION = int(os.getenv('MAX_INVOICES_PER_SESSION', 0))
 logger.info(f"Max invoices per session: {MAX_INVOICES_PER_SESSION if MAX_INVOICES_PER_SESSION > 0 else 'Unlimited'}")
 
-# Define invoice schema
 INVOICE_SCHEMA = [
     "Invoice_Date",
     "Invoice_No",
@@ -69,7 +68,10 @@ INVOICE_SCHEMA = [
     "GST_Sales_Tax",
     "Inclusive_Value",
     "Advance_Tax",
-    "Net_Amount"
+    "Net_Amount",
+    "Discount",
+    "Incentive",
+    "Location"
 ]
 
 # Rate Limiter Class
@@ -226,7 +228,10 @@ def extract_invoice_data_with_gemini(image, schema, max_retries=3):
                 "GST_Sales_Tax": "1800",
                 "Inclusive_Value": "11800",
                 "Advance_Tax": "200",
-                "Net_Amount": "11600"
+                "Net_Amount": "11600",
+                "Discount": "500",
+                "Incentive": "100",
+                "Location": "Karachi, Pakistan"
             }}
             """
 

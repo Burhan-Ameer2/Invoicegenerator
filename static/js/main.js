@@ -287,6 +287,9 @@ function displayInvoices(invoices) {
             'Inclusive_Value',
             'Advance_Tax',
             'Net_Amount',
+            'Discount',
+            'Incentive',
+            'Location',
         ];
 
         schemaFields.forEach((field) => {
