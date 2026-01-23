@@ -369,7 +369,32 @@ def process_file_parallel(file_path, filename, schema, max_workers=5):
 @app.route('/')
 def index():
     """Render main page"""
-    return render_template('index.html', schema=INVOICE_SCHEMA, max_invoices=MAX_INVOICES_PER_SESSION)
+    # Use session schema if available, otherwise default
+    if 'schema' not in session:
+        session['schema'] = INVOICE_SCHEMA
+    
+    return render_template('index.html', schema=session['schema'], max_invoices=MAX_INVOICES_PER_SESSION)
+
+
+@app.route('/update_schema', methods=['POST'])
+def update_schema():
+    """Update the invoice schema for the current session"""
+    try:
+        data = request.get_json()
+        if not data or 'schema' not in data:
+            return jsonify({'error': 'Invalid data'}), 400
+        
+        new_schema = data['schema']
+        if not isinstance(new_schema, list) or not new_schema:
+            return jsonify({'error': 'Schema must be a non-empty list'}), 400
+            
+        session['schema'] = new_schema
+        logger.info(f"Schema updated for session: {new_schema}")
+        
+        return jsonify({'success': True, 'schema': new_schema})
+    except Exception as e:
+        logger.error(f"Error updating schema: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/upload', methods=['POST'])
@@ -426,7 +451,8 @@ def upload_files():
                 file.save(filepath)
 
                 # Process file
-                results = process_file_parallel(filepath, filename, INVOICE_SCHEMA)
+                current_schema = session.get('schema', INVOICE_SCHEMA)
+                results = process_file_parallel(filepath, filename, current_schema)
 
                 if results:
                     all_results.extend(results)
@@ -478,10 +504,11 @@ def get_invoices(session_id):
         return jsonify({'error': 'Session not found'}), 404
 
     # Prepare data for frontend (without base64 images for the table)
+    current_schema = session.get('schema', INVOICE_SCHEMA)
     table_data = []
     for idx, invoice in enumerate(invoices):
         row = {'row_id': idx}
-        for field in ['Source_File', 'Page_Number'] + INVOICE_SCHEMA:
+        for field in ['Source_File', 'Page_Number'] + current_schema:
             row[field] = invoice.get(field, '')
         table_data.append(row)
 
@@ -524,10 +551,11 @@ def export_excel(session_id):
         return jsonify({'error': 'Session not found'}), 404
 
     # Prepare DataFrame
+    current_schema = session.get('schema', INVOICE_SCHEMA)
     df_data = []
     for invoice in invoices:
         row = {}
-        for field in ['Source_File', 'Page_Number'] + INVOICE_SCHEMA:
+        for field in ['Source_File', 'Page_Number'] + current_schema:
             row[field] = invoice.get(field, '')
         df_data.append(row)
 
