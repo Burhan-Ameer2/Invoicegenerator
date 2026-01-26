@@ -8,28 +8,37 @@ let currentInvoiceIndex = 0;
 let totalInvoices = 0;
 // Initialize with default schema from HTML or fallback
 // Initialize with schema from server or default fallback
-const hardcodedDefaultSchema = [
-  "Invoice_Date",
-  "Invoice_No",
-  "Supplier_Name",
-  "Supplier_NTN",
-  "Supplier_GST_No",
-  "Supplier_Registration_No",
-  "Buyer_Name",
-  "Buyer_NTN",
-  "Buyer_GST_No",
-  "Buyer_Registration_No",
-  "Exclusive_Value",
-  "GST_Sales_Tax",
-  "Inclusive_Value",
-  "Advance_Tax",
-  "Net_Amount",
-  "Discount",
-  "Incentive",
-  "Location",
-];
-let currentSchema = window.SERVER_SCHEMA || [...hardcodedDefaultSchema];
-const defaultSchema = [...hardcodedDefaultSchema];
+let currentSchema = []; // Will store objects {id, name, description}
+
+// fetch actual fields from database on load
+$(document).ready(function () {
+    fetchFields();
+});
+
+function fetchFields() {
+    $.get('/api/fields', function(data) {
+        currentSchema = data;
+        updateUIWithNewSchema();
+    });
+}
+
+function updateUIWithNewSchema() {
+    // Update sidebar summary
+    const summaryList = $("#fieldsSummaryList");
+    if (summaryList.length) {
+        summaryList.empty();
+        currentSchema.forEach(field => {
+            if (field.is_active) {
+                summaryList.append(`
+                    <div class="text-muted-text font-medium">
+                        <i class="fas fa-check text-brand-red mr-2"></i>
+                        ${field.name.replace(/_/g, " ")}
+                    </div>
+                `);
+            }
+        });
+    }
+}
 
 // ======================
 // Document Ready
@@ -309,7 +318,7 @@ function displayInvoices(invoices) {
     row += `<td>${invoice.Source_File || ""}</td>`;
     row += `<td>${invoice.Page_Number || ""}</td>`;
 
-    const schemaFields = currentSchema;
+    const schemaFields = currentSchema.filter(f => f.is_active).map(f => f.name);
 
     schemaFields.forEach((field) => {
       const value = invoice[field] || "-";
@@ -488,7 +497,8 @@ function showAlert(type, message) {
   );
 }
 // ======================
-// Schema Management
+// ======================
+// Schema Management (PostgreSQL Dynamic)
 // ======================
 function openManageFieldsModal() {
   renderFieldsList();
@@ -502,71 +512,133 @@ function closeManageFieldsModal() {
 function renderFieldsList() {
   const list = $("#fieldsList");
   list.empty();
+  
+  $("#fieldCountBadge").text(currentSchema.length);
 
-  currentSchema.forEach((field, index) => {
+  currentSchema.forEach((field) => {
     const item = $(`
-            <div class="flex justify-between items-center bg-gray-50 p-2 rounded border border-gray-200">
-                <span class="font-medium text-sm text-dark-text">${field.replace(/_/g, " ")}</span>
-                <button onclick="removeField(${index})" class="text-gray-400 hover:text-red-500 transition">
-                    <i class="fas fa-trash-alt"></i>
-                </button>
+            <div class="bg-white p-4 rounded-xl border border-gray-100 shadow-sm hover:shadow-md transition-shadow space-y-3">
+                <div class="flex justify-between items-center gap-4">
+                    <div class="flex-1">
+                        <label class="block text-[10px] font-bold text-gray-300 uppercase mb-0.5">Field Identifier</label>
+                        <input type="text" value="${field.name}" 
+                               onchange="patchField(${field.id}, {name: this.value})"
+                               class="w-full font-bold text-base text-dark-text bg-transparent border-b-2 border-transparent hover:border-red-100 focus:border-brand-red focus:outline-none transition-colors">
+                    </div>
+                    <div class="flex flex-col items-end gap-2">
+                        <button onclick="deleteField(${field.id})" class="text-gray-300 hover:text-red-500 transition-colors p-1" title="Delete Field">
+                            <i class="fas fa-trash-alt"></i>
+                        </button>
+                        <div class="flex items-center gap-2 bg-gray-50 px-2 py-1 rounded-md border border-gray-100">
+                            <input type="checkbox" ${field.is_active ? 'checked' : ''} 
+                                   onchange="patchField(${field.id}, {is_active: this.checked})"
+                                   id="active_${field.id}" 
+                                   class="w-4 h-4 text-brand-red border-gray-300 rounded focus:ring-brand-red cursor-pointer">
+                            <label for="active_${field.id}" class="text-[10px] font-bold text-gray-500 cursor-pointer">ACTIVE</label>
+                        </div>
+                    </div>
+                </div>
+                <div class="pt-1">
+                    <label class="block text-[10px] font-bold text-gray-300 uppercase mb-1">AI Prompt Instruction (Context)</label>
+                    <textarea onchange="patchField(${field.id}, {description: this.value})"
+                              placeholder="Describe this field for the AI..."
+                              rows="1"
+                              class="w-full text-sm text-muted-text bg-gray-50 border-0 rounded-lg p-3 focus:ring-2 focus:ring-brand-red focus:bg-white transition-all outline-none resize-none overflow-hidden"
+                              oninput="this.style.height = ''; this.style.height = this.scrollHeight + 'px'">${field.description || ""}</textarea>
+                </div>
             </div>
         `);
+    
+    // Auto-resize textareas on load
+    item.find('textarea').each(function() {
+        this.style.height = this.scrollHeight + 'px';
+    });
+
     list.append(item);
   });
 }
 
 function addNewField() {
-  const input = $("#newFieldInput");
-  let value = input.val().trim();
+  const nameInput = $("#newFieldName");
+  const descInput = $("#newFieldDesc");
+  const name = nameInput.val().trim();
+  const description = descInput.val().trim();
 
-  if (!value) return;
-
-  // Replace spaces with underscores for ID consistency
-  value = value.replace(/\s+/g, "_");
-
-  if (currentSchema.includes(value)) {
-    showAlert("warning", "Field already exists!");
+  if (!name) {
+    showAlert("warning", "Field name is required");
     return;
   }
 
-  currentSchema.push(value);
-  input.val("");
-  renderFieldsList();
-}
-
-function removeField(index) {
-  if (currentSchema.length <= 1) {
-    showAlert("warning", "You must have at least one field.");
-    return;
-  }
-  currentSchema.splice(index, 1);
-  renderFieldsList();
-}
-
-function resetSchemaToDefault() {
-  currentSchema = [...defaultSchema];
-  renderFieldsList();
-  showAlert("success", "Schema reset to default. Click Save to apply.");
-}
-
-function saveSchemaChanges() {
   $.ajax({
-    url: "/update_schema",
+    url: "/api/fields",
     type: "POST",
     contentType: "application/json",
-    data: JSON.stringify({ schema: currentSchema }),
-    success: function (response) {
-      if (response.success) {
-        showAlert("success", "Schema updated successfully! Reloading...");
-        closeManageFieldsModal();
-        setTimeout(() => location.reload(), 1000); // Reload to reflect changes in UI/Sidebar
-      } else {
-        showAlert("danger", "Failed to update schema.");
+    data: JSON.stringify({ name, description }),
+    success: function (newField) {
+      currentSchema.push(newField);
+      nameInput.val("");
+      descInput.val("");
+      renderFieldsList();
+      updateUIWithNewSchema();
+      showAlert("success", "Field added successfully");
+    },
+    error: function (xhr) {
+      showAlert("danger", xhr.responseJSON?.error || "Failed to add field");
+    },
+  });
+}
+
+function patchField(id, data) {
+  $.ajax({
+    url: `/api/fields/${id}`,
+    type: "PATCH",
+    contentType: "application/json",
+    data: JSON.stringify(data),
+    success: function (updatedField) {
+      const index = currentSchema.findIndex(f => f.id === id);
+      if (index !== -1) {
+          currentSchema[index] = updatedField;
+          updateUIWithNewSchema();
       }
     },
     error: function (xhr) {
-      showAlert("danger", "Error updating schema: " + xhr.responseText);
+      showAlert("danger", xhr.responseJSON?.error || "Failed to update field");
     },
   });
+}
+
+function deleteField(id) {
+  if (!confirm("Are you sure you want to delete this field?")) return;
+
+  $.ajax({
+    url: `/api/fields/${id}`,
+    type: "DELETE",
+    success: function () {
+      currentSchema = currentSchema.filter(f => f.id !== id);
+      renderFieldsList();
+      updateUIWithNewSchema();
+      showAlert("success", "Field deleted");
+    },
+    error: function () {
+      showAlert("danger", "Failed to delete field");
+    },
+  });
+}
+
+// ======================
+// Prompt Preview logic
+// ======================
+function openPromptPreviewModal() {
+  $("#promptContentView").text("Loading AI prompt...");
+  $("#promptPreviewModal").removeClass("hidden");
+  
+  $.get('/api/prompt-preview', function(data) {
+    $("#promptContentView").text(data.prompt);
+  }).fail(function() {
+    $("#promptContentView").text("Error loading prompt.");
+  });
+}
+
+function closePromptPreviewModal() {
+  $("#promptPreviewModal").addClass("hidden");
 }

@@ -18,6 +18,8 @@ from collections import deque
 import uuid
 import pickle
 from pathlib import Path
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import inspect
 
 # Load environment variables
 load_dotenv()
@@ -37,6 +39,66 @@ app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['SESSION_FOLDER'] = 'sessions'
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 
+# Database Configuration
+# Default to SQLite if DATABASE_URL is not provided
+database_url = os.getenv('DATABASE_URL')
+if database_url and database_url.startswith("postgres://"):
+    # SQLAlchemy 1.4+ requires 'postgresql://' instead of 'postgres://'
+    database_url = database_url.replace("postgres://", "postgresql://", 1)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url or 'sqlite:///invoice_generator.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+
+# Database Model
+class SchemaField(db.Model):
+    __tablename__ = 'schema_fields'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), unique=True, nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'name': self.name,
+            'description': self.description or "",
+            'is_active': self.is_active
+        }
+
+# Initialize Database and Seed Data
+def init_db():
+    with app.app_context():
+        db.create_all()
+        # Seed initial data if table is empty
+        if SchemaField.query.count() == 0:
+            initial_fields = [
+                ("Invoice_Date", "The date mentioned on the invoice in YYYY-MM-DD format"),
+                ("Invoice_No", "The unique invoice number or reference number"),
+                ("Supplier_Name", "The name of the company or person providing the goods or service"),
+                ("Supplier_NTN", "National Tax Number of the supplier"),
+                ("Supplier_GST_No", "GST Registration Number of the supplier"),
+                ("Supplier_Registration_No", "Company registration number of the supplier"),
+                ("Buyer_Name", "The name of the customer or recipient"),
+                ("Buyer_NTN", "National Tax Number of the buyer"),
+                ("Buyer_GST_No", "GST Registration Number of the buyer"),
+                ("Buyer_Registration_No", "Company registration number of the buyer"),
+                ("Exclusive_Value", "The base amount before taxes"),
+                ("GST_Sales_Tax", "The amount of Sales Tax or GST applied"),
+                ("Inclusive_Value", "The total amount including taxes"),
+                ("Advance_Tax", "Any withholding or advance tax mentioned"),
+                ("Net_Amount", "The final payable amount"),
+                ("Discount", "Total discount amount applied"),
+                ("Incentive", "Any incentive or bonus mentioned"),
+                ("Location", "Physical location or city mentioned on the invoice")
+            ]
+            for name, desc in initial_fields:
+                db.session.add(SchemaField(name=name, description=desc))
+            db.session.commit()
+            logger.info("Database seeded with initial schema fields")
+
 # Increase timeouts for production
 import socket
 socket.setdefaulttimeout(300)  # 5 minutes timeout
@@ -53,26 +115,14 @@ else:
 MAX_INVOICES_PER_SESSION = int(os.getenv('MAX_INVOICES_PER_SESSION', 0))
 logger.info(f"Max invoices per session: {MAX_INVOICES_PER_SESSION if MAX_INVOICES_PER_SESSION > 0 else 'Unlimited'}")
 
-INVOICE_SCHEMA = [
-    "Invoice_Date",
-    "Invoice_No",
-    "Supplier_Name",
-    "Supplier_NTN",
-    "Supplier_GST_No",
-    "Supplier_Registration_No",
-    "Buyer_Name",
-    "Buyer_NTN",
-    "Buyer_GST_No",
-    "Buyer_Registration_No",
-    "Exclusive_Value",
-    "GST_Sales_Tax",
-    "Inclusive_Value",
-    "Advance_Tax",
-    "Net_Amount",
-    "Discount",
-    "Incentive",
-    "Location"
-]
+# INVOICE_SCHEMA is now dynamic and stored in the database
+def get_current_fields():
+    """Fetch active fields from database"""
+    return SchemaField.query.filter_by(is_active=True).all()
+
+def get_current_schema_names():
+    """Fetch active field names as a list of strings"""
+    return [field.name for field in get_current_fields()]
 
 # Rate Limiter Class
 class RateLimiter:
@@ -112,6 +162,45 @@ rate_limiter = RateLimiter(max_calls_per_minute=50)
 # Global storage for processed invoices with disk persistence
 processed_invoices = {}
 processed_invoices_lock = threading.Lock()
+
+def get_gemini_prompt(fields):
+    """Generate the Gemini prompt based on database fields"""
+    field_descriptions = "\n".join([f"- {f.name}: {f.description or 'Extract this value'}" for f in fields])
+    
+    # Static part of the prompt
+    rules = """
+            IMPORTANT RULES:
+            1. PRIORITY FOR HANDWRITTEN/MANUAL ADJUSTMENTS: Handwritten values ALWAYS take priority over printed/typed values. This includes:
+               - Handwritten numbers written ABOVE, BELOW, or BESIDE printed values (use the handwritten one)
+               - Handwritten totals, amounts, or corrections anywhere on the invoice
+               - Manual adjustments even if the original printed value is NOT crossed out
+               - Strikethrough text with handwritten replacement
+               - Values written in pen/marker over or near printed numbers
+               - Annotations, adjustments, or corrections in margins or empty spaces
+               - Whiteout/correction fluid with new values written on top
+               If you see BOTH a printed value AND a handwritten value for the same field, ALWAYS use the handwritten one - it represents the final corrected/adjusted amount.
+            2. Return ONLY a valid JSON object, nothing else
+            3. Use YYYY-MM-DD format for dates
+            4. Extract numbers without currency symbols or commas
+            5. If a field is not found or unclear, use null
+            6. Do NOT perform any calculations - extract values exactly as they appear on the invoice
+            7. Do NOT include any explanations or text outside the JSON
+            """
+            
+    example_json = {f.name: "value" for f in fields[:3]} # Just a small example
+    if not example_json: example_json = {"Field_Name": "Value"}
+
+    return f"""
+            You are an expert invoice data extractor. Analyze this invoice image carefully and extract the following information.
+
+            Extract these fields:
+            {field_descriptions}
+
+            {rules}
+
+            Example JSON response format:
+            {json.dumps(example_json, indent=12)}
+            """
 
 def save_session_to_disk(session_id, data):
     """Save session data to disk for persistence"""
@@ -198,52 +287,9 @@ def extract_invoice_data_with_gemini(image, schema, max_retries=3):
             img_base64 = image_to_base64(image)
 
             # Initialize Gemini model
-            model = genai.GenerativeModel('gemini-3-pro-preview')
-#    random commit
-            prompt = f"""
-            You are an expert invoice data extractor. Analyze this invoice image carefully and extract the following information.
-
-            Extract these fields: {', '.join(schema)}
-
-            IMPORTANT RULES:
-            1. PRIORITY FOR HANDWRITTEN/MANUAL ADJUSTMENTS: Handwritten values ALWAYS take priority over printed/typed values. This includes:
-               - Handwritten numbers written ABOVE, BELOW, or BESIDE printed values (use the handwritten one)
-               - Handwritten totals, amounts, or corrections anywhere on the invoice
-               - Manual adjustments even if the original printed value is NOT crossed out
-               - Strikethrough text with handwritten replacement
-               - Values written in pen/marker over or near printed numbers
-               - Annotations, adjustments, or corrections in margins or empty spaces
-               - Whiteout/correction fluid with new values written on top
-               If you see BOTH a printed value AND a handwritten value for the same field, ALWAYS use the handwritten one - it represents the final corrected/adjusted amount.
-            2. Return ONLY a valid JSON object, nothing else
-            3. Use YYYY-MM-DD format for dates
-            4. Extract numbers without currency symbols or commas
-            5. If a field is not found or unclear, use null
-            6. Do NOT perform any calculations - extract values exactly as they appear on the invoice
-            7. Do NOT include any explanations or text outside the JSON
-
-            Example JSON response:
-            {{
-                "Invoice_Date": "2024-01-15",
-                "Invoice_No": "INV-12345",
-                "Supplier_Name": "ABC Company",
-                "Supplier_NTN": "1234567",
-                "Supplier_GST_No": "GST-123",
-                "Supplier_Registration_No": "REG-456",
-                "Buyer_Name": "XYZ Ltd",
-                "Buyer_NTN": "7654321",
-                "Buyer_GST_No": "GST-789",
-                "Buyer_Registration_No": "REG-012",
-                "Exclusive_Value": "10000",
-                "GST_Sales_Tax": "1800",
-                "Inclusive_Value": "11800",
-                "Advance_Tax": "200",
-                "Net_Amount": "11600",
-                "Discount": "500",
-                "Incentive": "100",
-                "Location": "Karachi, Pakistan"
-            }}
-            """
+            model = genai.GenerativeModel('gemini-2.5-flash') # Using flash for better speed
+            
+            prompt = get_gemini_prompt(schema)
 
             # Send request to Gemini
             image_part = {
@@ -285,8 +331,8 @@ def extract_invoice_data_with_gemini(image, schema, max_retries=3):
                 else:
                     raise Exception("INVALID_JSON")
 
-            # Filter to only include schema fields
-            filtered_data = {key: extracted_data.get(key) for key in schema}
+            # Filter to only include schema fields by name
+            filtered_data = {field.name: extracted_data.get(field.name) for field in schema}
 
             return filtered_data
 
@@ -379,32 +425,83 @@ def process_file_parallel(file_path, filename, schema, max_workers=5):
 @app.route('/')
 def index():
     """Render main page"""
-    # Use session schema if available, otherwise default
-    if 'schema' not in session:
-        session['schema'] = INVOICE_SCHEMA
+    fields = get_current_fields()
+    schema_names = [f.name for f in fields]
+    return render_template('index.html', schema=schema_names, max_invoices=MAX_INVOICES_PER_SESSION)
+
+
+@app.route('/api/fields', methods=['GET'])
+def get_fields():
+    """API endpoint to get all fields"""
+    fields = SchemaField.query.order_by(SchemaField.created_at).all()
+    return jsonify([f.to_dict() for f in fields])
+
+
+@app.route('/api/fields', methods=['POST'])
+def add_field():
+    """API endpoint to add a new field"""
+    data = request.json
+    name = data.get('name', '').strip().replace(' ', '_')
+    description = data.get('description', '').strip()
     
-    return render_template('index.html', schema=session['schema'], max_invoices=MAX_INVOICES_PER_SESSION)
+    if not name:
+        return jsonify({'error': 'Field name is required'}), 400
+        
+    if SchemaField.query.filter_by(name=name).first():
+        return jsonify({'error': f'Field "{name}" already exists'}), 400
+        
+    new_field = SchemaField(name=name, description=description)
+    db.session.add(new_field)
+    db.session.commit()
+    return jsonify(new_field.to_dict()), 201
+
+
+@app.route('/api/fields/<int:field_id>', methods=['PATCH'])
+def update_field(field_id):
+    """API endpoint to update a field"""
+    field = SchemaField.query.get_or_404(field_id)
+    data = request.json
+    
+    if 'name' in data:
+        name = data['name'].strip().replace(' ', '_')
+        if name and name != field.name:
+            if SchemaField.query.filter_by(name=name).first():
+                return jsonify({'error': f'Field "{name}" already exists'}), 400
+            field.name = name
+            
+    if 'description' in data:
+        field.description = data['description'].strip()
+        
+    if 'is_active' in data:
+        field.is_active = bool(data['is_active'])
+        
+    db.session.commit()
+    return jsonify(field.to_dict())
+
+
+@app.route('/api/fields/<int:field_id>', methods=['DELETE'])
+def delete_field(field_id):
+    """API endpoint to delete a field"""
+    field = SchemaField.query.get_or_404(field_id)
+    db.session.delete(field)
+    db.session.commit()
+    return jsonify({'success': True})
+
+
+@app.route('/api/prompt-preview', methods=['GET'])
+def prompt_preview():
+    """API endpoint to preview the AI prompt"""
+    fields = get_current_fields()
+    prompt = get_gemini_prompt(fields)
+    return jsonify({'prompt': prompt.strip()})
 
 
 @app.route('/update_schema', methods=['POST'])
-def update_schema():
-    """Update the invoice schema for the current session"""
-    try:
-        data = request.get_json()
-        if not data or 'schema' not in data:
-            return jsonify({'error': 'Invalid data'}), 400
-        
-        new_schema = data['schema']
-        if not isinstance(new_schema, list) or not new_schema:
-            return jsonify({'error': 'Schema must be a non-empty list'}), 400
-            
-        session['schema'] = new_schema
-        logger.info(f"Schema updated for session: {new_schema}")
-        
-        return jsonify({'success': True, 'schema': new_schema})
-    except Exception as e:
-        logger.error(f"Error updating schema: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+def update_schema_session():
+    """Legacy endpoint for backward compatibility (updates session then syncs to DB)"""
+    # This now basically does nothing but keep existing JS working if needed
+    # But we want to move towards the new /api/fields
+    return jsonify({'success': True, 'message': 'Please use /api/fields for permanent changes'})
 
 
 @app.route('/upload', methods=['POST'])
@@ -415,88 +512,53 @@ def upload_files():
             return jsonify({'error': 'No files uploaded'}), 400
 
         files = request.files.getlist('files[]')
-
         if not files or files[0].filename == '':
             return jsonify({'error': 'No files selected'}), 400
 
-        # Count total invoices to process (pages in PDFs + individual images)
+        # Fetch dynamic schema from DB
+        current_schema_objects = get_current_fields()
+        current_schema_names = [f.name for f in current_schema_objects]
+
+        # Count total invoices
         total_invoice_count = 0
         for file in files:
-            if file and file.filename:
-                file_extension = file.filename.lower().split('.')[-1]
-                if file_extension == 'pdf':
-                    # Save temporarily to count pages
-                    temp_path = os.path.join(app.config['UPLOAD_FOLDER'], f"temp_{file.filename}")
-                    file.save(temp_path)
-                    with open(temp_path, 'rb') as f:
-                        pdf_bytes = f.read()
-                    pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-                    total_invoice_count += len(pdf_doc)
-                    pdf_doc.close()
-                    os.remove(temp_path)
-                    file.seek(0)  # Reset file pointer
-                else:
-                    total_invoice_count += 1
+            file_extension = file.filename.lower().split('.')[-1]
+            if file_extension == 'pdf':
+                temp_path = os.path.join(app.config['UPLOAD_FOLDER'], f"temp_{uuid.uuid4()}_{file.filename}")
+                file.save(temp_path)
+                with open(temp_path, 'rb') as f:
+                    pdf_bytes = f.read()
+                pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                total_invoice_count += len(pdf_doc)
+                pdf_doc.close()
+                os.remove(temp_path)
+                file.seek(0)
+            else:
+                total_invoice_count += 1
 
-        # Check if exceeds limit
         if MAX_INVOICES_PER_SESSION > 0 and total_invoice_count > MAX_INVOICES_PER_SESSION:
-            return jsonify({
-                'error': f'Invoice limit exceeded. Maximum {MAX_INVOICES_PER_SESSION} invoices allowed per session. You attempted to process {total_invoice_count} invoices.',
-                'limit': MAX_INVOICES_PER_SESSION,
-                'attempted': total_invoice_count
-            }), 400
+            return jsonify({'error': f'Limit exceeded. Max {MAX_INVOICES_PER_SESSION} allowed.'}), 400
 
-        # Generate session ID
         session_id = str(uuid.uuid4())
-
-        # Save files and process
         all_results = []
-        file_results = {}
 
         for file in files:
             if file and file.filename:
-                # Save file temporarily
                 filename = file.filename
                 filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
                 file.save(filepath)
-
-                # Process file
-                current_schema = session.get('schema', INVOICE_SCHEMA)
-                results = process_file_parallel(filepath, filename, current_schema)
-
+                # Pass schema objects (with descriptions) to the processing logic
+                results = process_file_parallel(filepath, filename, current_schema_objects)
                 if results:
                     all_results.extend(results)
-                    file_results[filename] = {
-                        'success': True,
-                        'count': len(results)
-                    }
-                else:
-                    file_results[filename] = {
-                        'success': False,
-                        'count': 0
-                    }
+                try: os.remove(filepath)
+                except: pass
 
-                # Clean up file
-                try:
-                    os.remove(filepath)
-                except:
-                    pass
-
-        # Store results in memory and disk
         with processed_invoices_lock:
             processed_invoices[session_id] = all_results
         
-        # Save to disk for persistence
         save_session_to_disk(session_id, all_results)
-        
-        logger.info(f"Session {session_id}: Processed {len(all_results)} invoices successfully")
-
-        return jsonify({
-            'success': True,
-            'session_id': session_id,
-            'total_invoices': len(all_results),
-            'file_results': file_results
-        })
+        return jsonify({'success': True, 'session_id': session_id, 'total_invoices': len(all_results)})
 
     except Exception as e:
         logger.error(f"Upload error: {str(e)}")
@@ -506,43 +568,29 @@ def upload_files():
 @app.route('/get_invoices/<session_id>')
 def get_invoices(session_id):
     """Get processed invoices for a session"""
-    logger.info(f"Fetching invoices for session: {session_id}")
-    
     invoices = get_session_data(session_id)
     if invoices is None:
-        logger.error(f"Session not found: {session_id}")
         return jsonify({'error': 'Session not found'}), 404
 
-    # Prepare data for frontend (without base64 images for the table)
-    current_schema = session.get('schema', INVOICE_SCHEMA)
+    current_schema_names = get_current_schema_names()
     table_data = []
     for idx, invoice in enumerate(invoices):
         row = {'row_id': idx}
-        for field in ['Source_File', 'Page_Number'] + current_schema:
+        for field in ['Source_File', 'Page_Number'] + current_schema_names:
             row[field] = invoice.get(field, '')
         table_data.append(row)
 
-    return jsonify({
-        'success': True,
-        'invoices': table_data
-    })
+    return jsonify({'success': True, 'invoices': table_data})
 
 
 @app.route('/get_invoice_image/<session_id>/<int:invoice_id>')
 def get_invoice_image(session_id, invoice_id):
     """Get invoice image and data for modal"""
-    logger.info(f"Fetching invoice image for session: {session_id}, invoice: {invoice_id}")
-    
     invoices = get_session_data(session_id)
-    if invoices is None:
-        logger.error(f"Session not found: {session_id}")
-        return jsonify({'error': 'Session not found'}), 404
-
-    if invoice_id < 0 or invoice_id >= len(invoices):
-        return jsonify({'error': 'Invoice not found'}), 404
+    if invoices is None or invoice_id < 0 or invoice_id >= len(invoices):
+        return jsonify({'error': 'Not found'}), 404
 
     invoice = invoices[invoice_id]
-
     return jsonify({
         'success': True,
         'image': invoice.get('_image_base64', ''),
@@ -553,34 +601,26 @@ def get_invoice_image(session_id, invoice_id):
 @app.route('/export/<session_id>')
 def export_excel(session_id):
     """Export invoices to Excel"""
-    logger.info(f"Exporting session: {session_id}")
-    
     invoices = get_session_data(session_id)
     if invoices is None:
-        logger.error(f"Session not found: {session_id}")
         return jsonify({'error': 'Session not found'}), 404
 
-    # Prepare DataFrame
-    current_schema = session.get('schema', INVOICE_SCHEMA)
+    current_schema_names = get_current_schema_names()
     df_data = []
     for invoice in invoices:
         row = {}
-        for field in ['Source_File', 'Page_Number'] + current_schema:
+        for field in ['Source_File', 'Page_Number'] + current_schema_names:
             row[field] = invoice.get(field, '')
         df_data.append(row)
 
     df = pd.DataFrame(df_data)
-
-    # Create Excel file
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Invoice Data')
-
     output.seek(0)
 
     from flask import send_file
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
     return send_file(
         output,
         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -590,15 +630,14 @@ def export_excel(session_id):
 
 
 if __name__ == '__main__':
-    # Create folders if they don't exist
+    # Initialize database
+    init_db()
+    
+    # Create folders
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
     os.makedirs(app.config['SESSION_FOLDER'], exist_ok=True)
 
     # Run app
     port = int(os.environ.get('PORT', 8080))
     debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
-    
-    logger.info(f"Starting server on port {port}")
-    logger.info(f"Debug mode: {debug_mode}")
-    
     app.run(host='0.0.0.0', port=port, debug=debug_mode, threaded=True)

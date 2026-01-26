@@ -198,7 +198,7 @@
                 </button>
             </div>
 
-            <div class="text-sm space-y-1">
+            <div id="fieldsSummaryList" class="text-sm space-y-1 mb-4">
                 {% for field in schema %}
                 <div class="text-muted-text font-medium">
                     <i class="fas fa-check text-brand-red mr-2"></i>
@@ -206,6 +206,11 @@
                 </div>
                 {% endfor %}
             </div>
+
+            <button onclick="openPromptPreviewModal()"
+                    class="w-full text-sm border-2 border-brand-red text-brand-red px-3 py-2 rounded-lg hover:bg-red-50 transition font-semibold">
+                <i class="fas fa-eye mr-2"></i>View AI Prompt
+            </button>
         </div>
 
     </aside>
@@ -271,7 +276,7 @@
 
 <!-- Manage Fields Modal -->
 <div id="manageFieldsModal" class="hidden fixed inset-0 bg-black bg-opacity-75 z-50 flex items-center justify-center p-4">
-    <div class="bg-white rounded-xl shadow-2xl max-w-md w-full flex flex-col max-h-[85vh]">
+    <div class="bg-white rounded-xl shadow-2xl max-w-2xl w-full flex flex-col max-h-[90vh]">
         <div class="bg-brand-red text-white px-6 py-4 rounded-t-xl flex justify-between items-center">
             <h3 class="text-xl font-bold flex items-center gap-2">
                 <i class="fas fa-tasks"></i>
@@ -282,33 +287,77 @@
             </button>
         </div>
 
-        <div class="p-6 flex-1 overflow-auto">
-            <p class="text-sm text-gray-500 mb-4">
-                Add or remove fields to extract. Changes apply to <strong>new file uploads</strong>.
+        <div class="p-6 flex-1 overflow-y-auto">
+            <p class="text-sm text-gray-500 mb-6">
+                Add, update, or remove fields to extract. Changes apply to <strong>new file uploads</strong>.
             </p>
 
-            <div class="flex gap-2 mb-4">
-                <input type="text" id="newFieldInput" placeholder="Enter field name (e.g., PO Number)"
-                       class="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-red">
+            <div class="bg-red-50 p-4 rounded-xl border border-red-100 space-y-4 mb-8">
+                <h4 class="text-sm font-bold text-brand-red flex items-center gap-2">
+                    <i class="fas fa-plus-circle"></i> Add New Extraction Field
+                </h4>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1">Field Name (ID)</label>
+                        <input type="text" id="newFieldName" placeholder="e.g., PO_Number"
+                               class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-red">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1">AI Description</label>
+                        <input type="text" id="newFieldDesc" placeholder="e.g., Extract the PO number"
+                               class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-red">
+                    </div>
+                </div>
                 <button onclick="addNewField()"
-                        class="bg-brand-red text-white px-3 py-2 rounded-lg hover:bg-promo-red transition font-semibold text-sm">
+                        class="w-full bg-brand-red text-white py-2 rounded-lg hover:bg-promo-red transition font-semibold shadow-md flex items-center justify-center gap-2">
                     <i class="fas fa-plus"></i>
+                    <span>Register New Field</span>
                 </button>
             </div>
 
-            <div id="fieldsList" class="space-y-2 max-h-[300px] overflow-y-auto pr-1">
+            <div class="flex justify-between items-center mb-4 border-b pb-2">
+                <h4 class="font-bold text-dark-text text-sm flex items-center gap-2">
+                    <i class="fas fa-list-ul text-brand-red"></i>
+                    Configured Fields
+                </h4>
+                <span id="fieldCountBadge" class="bg-brand-red text-white px-3 py-0.5 rounded-full text-xs font-bold shadow-sm">0</span>
+            </div>
+
+            <div id="fieldsList" class="grid grid-cols-1 gap-4">
                 <!-- Fields will be dynamically loaded here by JS -->
             </div>
         </div>
 
-        <div class="border-t-2 border-gray-200 px-6 py-4 bg-light-bg rounded-b-xl flex justify-between items-center">
-            <button onclick="resetSchemaToDefault()"
-                    class="text-xs text-red-600 hover:text-red-800 underline font-medium">
-                Reset to Default
+        <div class="border-t-2 border-gray-200 px-6 py-4 bg-light-bg rounded-b-xl flex justify-end">
+            <button onclick="closeManageFieldsModal()"
+                    class="px-5 py-2 bg-gray-200 text-dark-text rounded-lg hover:bg-gray-300 transition font-semibold">
+                Close
             </button>
-            <button onclick="saveSchemaChanges()"
+        </div>
+    </div>
+</div>
+
+<!-- Prompt Preview Modal -->
+<div id="promptPreviewModal" class="hidden fixed inset-0 bg-black bg-opacity-75 z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-xl shadow-2xl max-w-4xl w-full flex flex-col max-h-[90vh]">
+        <div class="bg-brand-red text-white px-6 py-4 rounded-t-xl flex justify-between items-center">
+            <h3 class="text-xl font-bold flex items-center gap-2">
+                <i class="fas fa-robot"></i>
+                AI Prompt Preview
+            </h3>
+            <button onclick="closePromptPreviewModal()" class="text-white hover:text-red-200 transition text-2xl">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+
+        <div class="p-6 flex-1 overflow-auto bg-gray-900">
+            <pre id="promptContentView" class="text-green-400 font-mono text-sm whitespace-pre-wrap leading-relaxed"></pre>
+        </div>
+
+        <div class="border-t-2 border-gray-200 px-6 py-4 bg-light-bg rounded-b-xl flex justify-end">
+            <button onclick="closePromptPreviewModal()"
                     class="px-5 py-2 bg-brand-red text-white rounded-lg hover:bg-promo-red transition font-semibold shadow-md">
-                Save Changes
+                Got it
             </button>
         </div>
     </div>
