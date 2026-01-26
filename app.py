@@ -198,7 +198,7 @@ def extract_invoice_data_with_gemini(image, schema, max_retries=3):
             img_base64 = image_to_base64(image)
 
             # Initialize Gemini model
-            model = genai.GenerativeModel('gemini-2.5-flash')
+            model = genai.GenerativeModel('gemini-3-pro-preview')
 #    random commit
             prompt = f"""
             You are an expert invoice data extractor. Analyze this invoice image carefully and extract the following information.
@@ -206,11 +206,21 @@ def extract_invoice_data_with_gemini(image, schema, max_retries=3):
             Extract these fields: {', '.join(schema)}
 
             IMPORTANT RULES:
-            1. Return ONLY a valid JSON object, nothing else
-            2. Use YYYY-MM-DD format for dates
-            3. Extract numbers without currency symbols or commas
-            4. If a field is not found or unclear, use null
-            5. Do NOT include any explanations or text outside the JSON
+            1. PRIORITY FOR HANDWRITTEN/MANUAL ADJUSTMENTS: Handwritten values ALWAYS take priority over printed/typed values. This includes:
+               - Handwritten numbers written ABOVE, BELOW, or BESIDE printed values (use the handwritten one)
+               - Handwritten totals, amounts, or corrections anywhere on the invoice
+               - Manual adjustments even if the original printed value is NOT crossed out
+               - Strikethrough text with handwritten replacement
+               - Values written in pen/marker over or near printed numbers
+               - Annotations, adjustments, or corrections in margins or empty spaces
+               - Whiteout/correction fluid with new values written on top
+               If you see BOTH a printed value AND a handwritten value for the same field, ALWAYS use the handwritten one - it represents the final corrected/adjusted amount.
+            2. Return ONLY a valid JSON object, nothing else
+            3. Use YYYY-MM-DD format for dates
+            4. Extract numbers without currency symbols or commas
+            5. If a field is not found or unclear, use null
+            6. Do NOT perform any calculations - extract values exactly as they appear on the invoice
+            7. Do NOT include any explanations or text outside the JSON
 
             Example JSON response:
             {{
