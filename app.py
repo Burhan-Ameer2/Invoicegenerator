@@ -10,7 +10,7 @@ import io
 import base64
 import re
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import threading
@@ -78,8 +78,12 @@ class UsageStats(db.Model):
         return {
             'total_calls': self.total_calls,
             'trial_start_date': self.trial_start_date.isoformat(),
+            'trial_expires_at': (self.trial_start_date + timedelta(days=7)).isoformat(),
             'trial_days_remaining': max(0, 7 - (datetime.utcnow() - self.trial_start_date).days),
-            'is_trial_expired': (datetime.utcnow() - self.trial_start_date).days >= 7
+            'is_trial_expired': (datetime.utcnow() - self.trial_start_date).days >= 7,
+            'max_trial_invoices': MAX_TRIAL_INVOICES,
+            'invoices_remaining': max(0, MAX_TRIAL_INVOICES - self.total_calls),
+            'is_limit_reached': self.total_calls >= MAX_TRIAL_INVOICES
         }
 
 # Initialize Database and Seed Data
@@ -135,6 +139,10 @@ else:
 MAX_INVOICES_PER_SESSION = int(os.getenv('MAX_INVOICES_PER_SESSION', 0))
 logger.info(f"Max invoices per session: {MAX_INVOICES_PER_SESSION if MAX_INVOICES_PER_SESSION > 0 else 'Unlimited'}")
 
+# Get max trial invoices limit
+MAX_TRIAL_INVOICES = int(os.getenv('MAX_TRIAL_INVOICES', 1000))
+logger.info(f"Max trial invoices: {MAX_TRIAL_INVOICES}")
+
 # INVOICE_SCHEMA is now dynamic and stored in the database
 def get_current_fields():
     """Fetch active fields from database"""
@@ -182,6 +190,10 @@ rate_limiter = RateLimiter(max_calls_per_minute=50)
 # Global storage for processed invoices with disk persistence
 processed_invoices = {}
 processed_invoices_lock = threading.Lock()
+
+# Global storage for background processing status
+processing_status = {}
+processing_status_lock = threading.Lock()
 
 def get_gemini_prompt(fields):
     """Generate the Gemini prompt based on database fields with confidence scoring"""
@@ -434,7 +446,7 @@ def extract_invoice_data_with_gemini(image, schema, max_retries=3):
     return None
 
 
-def process_single_invoice(image, source_file, page_num, schema):
+def process_single_invoice(image, source_file, page_num, schema, session_id=None):
     """Process a single invoice"""
     try:
         extracted_data = extract_invoice_data_with_gemini(image, schema)
@@ -445,16 +457,39 @@ def process_single_invoice(image, source_file, page_num, schema):
             extracted_data['Page_Number'] = page_num
             extracted_data['_image_base64'] = img_base64
             logger.info(f"Successfully processed {source_file} - Page {page_num}")
+            
+            # Update progress status if session_id is provided
+            if session_id:
+                with processing_status_lock:
+                    if session_id in processing_status:
+                        processing_status[session_id]['processed'] += 1
+                        # Update percentage (assuming 20-100 range for processing)
+                        total = processing_status[session_id]['total']
+                        processed = processing_status[session_id]['processed']
+                        if total > 0:
+                            # 20% for upload, 80% for processing
+                            percentage = 20 + int((processed / total) * 80)
+                            processing_status[session_id]['percentage'] = min(100, percentage)
+                            processing_status[session_id]['message'] = f"Processing invoice {processed} of {total}..."
+
             return extracted_data
         else:
             logger.warning(f"Failed to extract data from {source_file} - Page {page_num}")
+            if session_id:
+                with processing_status_lock:
+                    if session_id in processing_status:
+                        processing_status[session_id]['processed'] += 1 # Still count it even if it failed
             return None
     except Exception as e:
         logger.error(f"Error processing {source_file} - Page {page_num}: {str(e)}")
+        if session_id:
+            with processing_status_lock:
+                if session_id in processing_status:
+                    processing_status[session_id]['processed'] += 1
         return None
 
 
-def process_file_parallel(file_path, filename, schema, max_workers=5):
+def process_file_parallel(file_path, filename, schema, session_id=None, max_workers=5):
     """Process file with multi-threading"""
     results = []
 
@@ -474,7 +509,8 @@ def process_file_parallel(file_path, filename, schema, max_workers=5):
                         image,
                         filename,
                         page_num,
-                        schema
+                        schema,
+                        session_id
                     ): page_num
                     for page_num, image in enumerate(images, start=1)
                 }
@@ -486,7 +522,7 @@ def process_file_parallel(file_path, filename, schema, max_workers=5):
         else:
             # Process image file
             image = Image.open(file_path)
-            result = process_single_invoice(image, filename, 1, schema)
+            result = process_single_invoice(image, filename, 1, schema, session_id)
             if result:
                 results.append(result)
 
@@ -504,6 +540,15 @@ def get_usage():
     if not stats:
         return jsonify({'error': 'Usage statistics not found'}), 404
     return jsonify(stats.to_dict())
+
+@app.route('/api/progress/<session_id>', methods=['GET'])
+def get_processing_progress(session_id):
+    """Get processing progress for a session"""
+    with processing_status_lock:
+        status = processing_status.get(session_id)
+        if not status:
+            return jsonify({'error': 'Session not found'}), 404
+        return jsonify(status)
 
 @app.route('/')
 def index():
@@ -588,7 +633,7 @@ def update_schema_session():
 
 
 def check_usage_limits():
-    """Check if the trial has expired"""
+    """Check if the trial has expired or limit reached"""
     stats = UsageStats.query.first()
     if not stats:
         return True, None
@@ -597,12 +642,16 @@ def check_usage_limits():
     if (datetime.utcnow() - stats.trial_start_date).days >= 7:
         return False, "Your 7-day trial has expired. The application is now unusable."
         
+    # Check invoice limit
+    if stats.total_calls >= MAX_TRIAL_INVOICES:
+        return False, f"You have reached the maximum limit of {MAX_TRIAL_INVOICES} invoices for the trial period."
+
     return True, None
 
 
 @app.route('/upload', methods=['POST'])
 def upload_files():
-    """Handle file upload and processing"""
+    """Handle file upload and start background processing"""
     try:
         # Check usage limits first
         is_allowed, error_msg = check_usage_limits()
@@ -616,57 +665,99 @@ def upload_files():
         if not files or files[0].filename == '':
             return jsonify({'error': 'No files selected'}), 400
 
-        # Fetch dynamic schema from DB
-        current_schema_objects = get_current_fields()
-        current_schema_names = [f.name for f in current_schema_objects]
-
-        # Count total invoices
+        # Save files to temp paths first
+        saved_files = []
         total_invoice_count = 0
+        
         for file in files:
-            file_extension = file.filename.lower().split('.')[-1]
-            if file_extension == 'pdf':
-                temp_path = os.path.join(app.config['UPLOAD_FOLDER'], f"temp_{uuid.uuid4()}_{file.filename}")
+            if file and file.filename:
+                temp_filename = f"temp_{uuid.uuid4()}_{file.filename}"
+                temp_path = os.path.join(app.config['UPLOAD_FOLDER'], temp_filename)
                 file.save(temp_path)
-                with open(temp_path, 'rb') as f:
-                    pdf_bytes = f.read()
-                pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-                total_invoice_count += len(pdf_doc)
-                pdf_doc.close()
-                os.remove(temp_path)
-                file.seek(0)
-            else:
-                total_invoice_count += 1
+                
+                # Count invoices
+                file_extension = file.filename.lower().split('.')[-1]
+                if file_extension == 'pdf':
+                    try:
+                        pdf_doc = fitz.open(temp_path)
+                        total_invoice_count += len(pdf_doc)
+                        pdf_doc.close()
+                    except Exception as e:
+                        logger.error(f"Error opening PDF {file.filename}: {str(e)}")
+                else:
+                    total_invoice_count += 1
+                
+                saved_files.append((temp_path, file.filename))
 
         if MAX_INVOICES_PER_SESSION > 0 and total_invoice_count > MAX_INVOICES_PER_SESSION:
+            # Clean up temp files
+            for path, _ in saved_files:
+                try: os.remove(path)
+                except: pass
             return jsonify({'error': f'Limit exceeded. Max {MAX_INVOICES_PER_SESSION} allowed.'}), 400
 
         session_id = str(uuid.uuid4())
-        all_results = []
-
-        for file in files:
-            if file and file.filename:
-                filename = file.filename
-                filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-                file.save(filepath)
-                # Pass schema objects (with descriptions) to the processing logic
-                results = process_file_parallel(filepath, filename, current_schema_objects)
-                if results:
-                    all_results.extend(results)
-                    
-                    # Increment total calls in database
-                    stats = UsageStats.query.first()
-                    if stats:
-                        stats.total_calls += len(results)
-                        db.session.commit()
-                        
-                try: os.remove(filepath)
-                except: pass
-
-        with processed_invoices_lock:
-            processed_invoices[session_id] = all_results
         
-        save_session_to_disk(session_id, all_results)
-        return jsonify({'success': True, 'session_id': session_id, 'total_invoices': len(all_results)})
+        # Initialize processing status
+        with processing_status_lock:
+            processing_status[session_id] = {
+                'percentage': 20, # Started after upload
+                'processed': 0,
+                'total': total_invoice_count,
+                'message': 'Starting extraction...',
+                'completed': False
+            }
+
+        # Start background processing
+        def run_background_processing(sid, files_to_process):
+            with app.app_context():
+                try:
+                    all_results = []
+                    current_schema_objects = get_current_fields()
+                    
+                    for filepath, original_filename in files_to_process:
+                        results = process_file_parallel(filepath, original_filename, current_schema_objects, sid)
+                        if results:
+                            all_results.extend(results)
+                            
+                            # Increment total calls in database
+                            stats = UsageStats.query.first()
+                            if stats:
+                                stats.total_calls += len(results)
+                                db.session.commit()
+                                
+                        try: os.remove(filepath)
+                        except: pass
+
+                    with processed_invoices_lock:
+                        processed_invoices[sid] = all_results
+                    
+                    save_session_to_disk(sid, all_results)
+                    
+                    with processing_status_lock:
+                        if sid in processing_status:
+                            processing_status[sid]['completed'] = True
+                            processing_status[sid]['percentage'] = 100
+                            processing_status[sid]['message'] = 'Processing complete!'
+                            
+                except Exception as e:
+                    logger.error(f"Background processing error: {str(e)}")
+                    with processing_status_lock:
+                        if sid in processing_status:
+                            processing_status[sid]['error'] = str(e)
+                            processing_status[sid]['completed'] = True
+
+        # Run in thread
+        import threading
+        thread = threading.Thread(target=run_background_processing, args=(session_id, saved_files))
+        thread.daemon = True # Ensure thread doesn't block shutdown
+        thread.start()
+
+        return jsonify({
+            'success': True, 
+            'session_id': session_id, 
+            'total_invoices': total_invoice_count
+        })
 
     except Exception as e:
         logger.error(f"Upload error: {str(e)}")

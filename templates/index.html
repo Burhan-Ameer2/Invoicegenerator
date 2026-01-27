@@ -315,6 +315,22 @@
               <div
                 class="flex items-center justify-between text-[10px] font-bold text-muted-text uppercase"
               >
+                <span>Invoice Limit</span>
+                <span id="invoiceLimitText">Checking...</span>
+              </div>
+              <div class="w-full bg-red-100 rounded-full h-2 overflow-hidden">
+                <div
+                  id="invoiceProgressBar"
+                  class="bg-brand-red h-2 transition-all duration-500"
+                  style="width: 0%"
+                ></div>
+              </div>
+            </div>
+
+            <div class="space-y-1">
+              <div
+                class="flex items-center justify-between text-[10px] font-bold text-muted-text uppercase"
+              >
                 <span>Trial Progress</span>
                 <span id="trialDaysText">7 Days Left</span>
               </div>

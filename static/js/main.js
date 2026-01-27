@@ -27,17 +27,47 @@ function updateUsageUI(data) {
 
     // Update call counter
     $("#usageTotalCalls").text(data.total_calls.toLocaleString());
-
-    // Update trial progress
-    const remaining = data.trial_days_remaining;
-    const progress = Math.min(100, ( (7 - remaining) / 7 ) * 100);
     
-    $("#trialDaysText").text(`${remaining} Day${remaining !== 1 ? 's' : ''} Left`);
+    // Update invoice limit progress
+    const maxInvoices = data.max_trial_invoices;
+    const currentInvoices = data.total_calls;
+    const invoicesRemaining = data.invoices_remaining;
+    
+    // Calculate percentage (capped at 100%)
+    const invoiceProgress = Math.min(100, (currentInvoices / maxInvoices) * 100);
+    
+    $("#invoiceLimitText").text(`${invoicesRemaining} Invoice${invoicesRemaining !== 1 ? 's' : ''} Left`);
+    $("#invoiceProgressBar").css("width", `${invoiceProgress}%`);
+    
+    // Show/hide limit warning color
+    if (invoiceProgress >= 90) {
+        $("#invoiceProgressBar").removeClass("bg-brand-red").addClass("bg-red-600");
+    }
+
+    // Start Trial Countdown
+    if (data.trial_expires_at) {
+        startTrialCountdown(new Date(data.trial_expires_at));
+    } else {
+        // Fallback for older data without expiration
+        const remaining = data.trial_days_remaining;
+        $("#trialDaysText").text(`${remaining} Day${remaining !== 1 ? 's' : ''} Left`);
+    }
+
+    // Update trial progress bar
+    const remainingDays = data.trial_days_remaining;
+    const progress = Math.min(100, ( (7 - remainingDays) / 7 ) * 100);
     $("#trialProgressBar").css("width", `${progress}%`);
 
-    // Enforce trial expiration
-    if (data.is_trial_expired) {
+    // Enforce trial expiration or limit reached
+    if (data.is_trial_expired || data.is_limit_reached) {
         $("#trialExpiredOverlay").removeClass("hidden");
+        
+        // Update overlay text based on reason
+        if (data.is_limit_reached) {
+             $("#trialExpiredTitle").text("Invoice Limit Reached");
+             $("#trialExpiredMessage").html(`You have processed <b>${currentInvoices}</b> invoices, reaching the trial limit. <br>To continue using the <span class="text-brand-red font-bold">Invoice Data Extractor Pro</span>, please contact support.`);
+        }
+        
         // Disable all buttons and inputs to make it unusable
         $("button, input, select, textarea").prop("disabled", true);
         // Special case for our custom browse button
@@ -316,14 +346,9 @@ function processFiles() {
       if (response?.success && response.session_id) {
         currentSessionId = response.session_id;
         totalInvoices = response.total_invoices || 0;
-        updateProgress(
-          100,
-          totalInvoices,
-          totalInvoices,
-          "Processing complete!",
-        );
-        fetchUsage(); // Update usage stats after processing
-        setTimeout(() => loadInvoices(currentSessionId), 800);
+        
+        // Start polling for progress
+        startProgressPolling(currentSessionId);
       } else {
         const msg = response?.error || "Processing failed.";
         showAlert("danger", msg);
@@ -339,6 +364,49 @@ function processFiles() {
       $("#processBtn").prop("disabled", false);
     },
   });
+}
+
+function startProgressPolling(sessionId) {
+  const pollInterval = setInterval(() => {
+    $.ajax({
+      url: `/api/progress/${sessionId}`,
+      type: "GET",
+      success: function (status) {
+        if (status.error) {
+          clearInterval(pollInterval);
+          showAlert("danger", status.error);
+          $("#progressSection").hide();
+          $("#processBtn").prop("disabled", false);
+          return;
+        }
+
+        const percentage = status.percentage !== undefined ? status.percentage : 0;
+
+        updateProgress(
+          percentage,
+          status.processed || 0,
+          status.total || 0,
+          status.message || "Processing..."
+        );
+
+        if (status.completed) {
+          clearInterval(pollInterval);
+          if (status.error) {
+            showAlert("danger", "Processing error: " + status.error);
+          } else {
+            fetchUsage(); // Update usage stats after processing
+            setTimeout(() => loadInvoices(sessionId), 500);
+          }
+        }
+      },
+      error: function () {
+        clearInterval(pollInterval);
+        showAlert("danger", "Lost connection to server while processing.");
+        $("#progressSection").hide();
+        $("#processBtn").prop("disabled", false);
+      }
+    });
+  }, 1000);
 }
 
 // ======================
@@ -738,4 +806,41 @@ function openPromptPreviewModal() {
 
 function closePromptPreviewModal() {
   $("#promptPreviewModal").addClass("hidden");
+}
+
+let trialCountdownInterval;
+
+function startTrialCountdown(expiryDate) {
+    // Clear any existing interval
+    if (trialCountdownInterval) clearInterval(trialCountdownInterval);
+    
+    function update() {
+        const now = new Date();
+        const diff = expiryDate - now;
+        
+        if (diff <= 0) {
+            $("#trialDaysText").text("Expired");
+            clearInterval(trialCountdownInterval);
+            // Optionally force UI refresh to lock it down
+            fetchUsageStats(); 
+            return;
+        }
+        
+        const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+        const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+        const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+        const seconds = Math.floor((diff % (1000 * 60)) / 1000);
+        
+        let timeString = "";
+        if (days > 0) timeString += `${days}d `;
+        if (hours > 0 || days > 0) timeString += `${hours}h `;
+        timeString += `${minutes}m ${seconds}s`;
+        
+        $("#trialDaysText").text(timeString);
+    }
+    
+    // Initial call
+    update();
+    // Start interval
+    trialCountdownInterval = setInterval(update, 1000);
 }
