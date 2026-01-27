@@ -38,6 +38,49 @@ function updateUIWithNewSchema() {
             }
         });
     }
+
+    // Update table header dynamically
+    const tableHeader = $("#invoicesTable thead");
+    if (tableHeader.length) {
+        let headerHtml = "<tr><th>Source</th><th>Page</th><th>Confidence</th>";
+        currentSchema.forEach(field => {
+            if (field.is_active) {
+                headerHtml += `<th>${field.name.replace(/_/g, " ")}</th>`;
+            }
+        });
+        headerHtml += "<th>Action</th></tr>";
+        tableHeader.html(headerHtml);
+    }
+}
+
+// ======================
+// Confidence Score Helpers
+// ======================
+function getConfidenceBadge(score) {
+    const numScore = parseInt(score) || 0;
+    let colorClass, icon;
+    
+    if (numScore >= 85) {
+        colorClass = 'bg-green-100 text-green-800 border-green-300';
+        icon = 'check-circle';
+    } else if (numScore >= 60) {
+        colorClass = 'bg-yellow-100 text-yellow-800 border-yellow-300';
+        icon = 'exclamation-circle';
+    } else {
+        colorClass = 'bg-red-100 text-red-800 border-red-300';
+        icon = 'times-circle';
+    }
+    
+    return `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-semibold border ${colorClass}">
+        <i class="fas fa-${icon}"></i> ${numScore}%
+    </span>`;
+}
+
+function getConfidenceColor(score) {
+    const numScore = parseInt(score) || 0;
+    if (numScore >= 85) return 'border-green-400';
+    if (numScore >= 60) return 'border-yellow-400';
+    return 'border-red-400';
 }
 
 // ======================
@@ -317,6 +360,10 @@ function displayInvoices(invoices) {
     let row = "<tr>";
     row += `<td>${invoice.Source_File || ""}</td>`;
     row += `<td>${invoice.Page_Number || ""}</td>`;
+    
+    // Add confidence badge
+    const confidence = invoice._overall_confidence || 0;
+    row += `<td>${getConfidenceBadge(confidence)}</td>`;
 
     const schemaFields = currentSchema.filter(f => f.is_active).map(f => f.name);
 
@@ -380,14 +427,36 @@ function showInvoiceModal(invoiceData, index) {
   const dataContainer = $("#modalInvoiceData");
   dataContainer.empty();
 
+  // Add overall confidence header
+  const overallConfidence = invoiceData.overall_confidence || 0;
+  const overallBadge = getConfidenceBadge(overallConfidence);
+  dataContainer.append(`
+    <div class="bg-gray-50 rounded-lg p-4 border-2 border-gray-200 shadow-sm mb-4 col-span-full">
+      <div class="flex items-center justify-between">
+        <div class="text-sm font-bold text-dark-text">Overall Extraction Confidence</div>
+        ${overallBadge}
+      </div>
+    </div>
+  `);
+
   const data = invoiceData.data || {};
+  const confidenceScores = invoiceData.confidence_scores || {};
+  
   for (let key in data) {
     if (key !== "_image_base64" && key !== "row_id") {
       const value = data[key] || "-";
       const label = key.replace(/_/g, " ");
+      const fieldConfidence = confidenceScores[key] || 0;
+      const borderColor = getConfidenceColor(fieldConfidence);
+      
       const fieldHtml = `
-                <div class="bg-white rounded-lg p-3 border-l-4 border-brand-red shadow-sm">
-                    <div class="text-xs font-semibold text-muted-text uppercase mb-1">${label}</div>
+                <div class="bg-white rounded-lg p-3 border-l-4 ${borderColor} shadow-sm">
+                    <div class="flex items-center justify-between mb-1">
+                      <div class="text-xs font-semibold text-muted-text uppercase">${label}</div>
+                      <span class="text-xs font-medium ${fieldConfidence >= 85 ? 'text-green-600' : fieldConfidence >= 60 ? 'text-yellow-600' : 'text-red-600'}">
+                        ${fieldConfidence}%
+                      </span>
+                    </div>
                     <div class="text-sm font-semibold text-dark-text">${value}</div>
                 </div>
             `;
@@ -517,43 +586,40 @@ function renderFieldsList() {
 
   currentSchema.forEach((field) => {
     const item = $(`
-            <div class="bg-white p-4 rounded-xl border border-gray-100 shadow-sm hover:shadow-md transition-shadow space-y-3">
-                <div class="flex justify-between items-center gap-4">
-                    <div class="flex-1">
-                        <label class="block text-[10px] font-bold text-gray-300 uppercase mb-0.5">Field Identifier</label>
-                        <input type="text" value="${field.name}" 
-                               onchange="patchField(${field.id}, {name: this.value})"
-                               class="w-full font-bold text-base text-dark-text bg-transparent border-b-2 border-transparent hover:border-red-100 focus:border-brand-red focus:outline-none transition-colors">
+            <div class="bg-white p-3 rounded-lg border border-gray-100 shadow-sm hover:border-brand-red/20 transition-all">
+                <div class="flex items-center gap-3">
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2 mb-1">
+                            <span class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">ID:</span>
+                            <input type="text" value="${field.name}" 
+                                   onchange="patchField(${field.id}, {name: this.value})"
+                                   class="flex-1 font-bold text-sm text-dark-text bg-transparent border-b border-transparent hover:border-red-200 focus:border-brand-red focus:outline-none transition-colors truncate">
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <span class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Prompt:</span>
+                            <input type="text" value="${field.description || ""}"
+                                   onchange="patchField(${field.id}, {description: this.value})"
+                                   placeholder="AI instruction..."
+                                   class="flex-1 text-xs text-muted-text bg-transparent border-b border-transparent hover:border-red-200 focus:border-brand-red focus:outline-none transition-colors truncate">
+                        </div>
                     </div>
-                    <div class="flex flex-col items-end gap-2">
-                        <button onclick="deleteField(${field.id})" class="text-gray-300 hover:text-red-500 transition-colors p-1" title="Delete Field">
-                            <i class="fas fa-trash-alt"></i>
-                        </button>
-                        <div class="flex items-center gap-2 bg-gray-50 px-2 py-1 rounded-md border border-gray-100">
+                    
+                    <div class="flex items-center gap-2 shrink-0 border-l pl-3 border-gray-100">
+                        <div class="flex flex-col items-center gap-1">
                             <input type="checkbox" ${field.is_active ? 'checked' : ''} 
                                    onchange="patchField(${field.id}, {is_active: this.checked})"
                                    id="active_${field.id}" 
                                    class="w-4 h-4 text-brand-red border-gray-300 rounded focus:ring-brand-red cursor-pointer">
-                            <label for="active_${field.id}" class="text-[10px] font-bold text-gray-500 cursor-pointer">ACTIVE</label>
+                            <label for="active_${field.id}" class="text-[8px] font-bold text-gray-400 cursor-pointer">ACTIVE</label>
                         </div>
+                        <button onclick="deleteField(${field.id})" class="text-gray-300 hover:text-red-500 transition-colors p-2" title="Delete Field">
+                            <i class="fas fa-trash-alt text-sm"></i>
+                        </button>
                     </div>
-                </div>
-                <div class="pt-1">
-                    <label class="block text-[10px] font-bold text-gray-300 uppercase mb-1">AI Prompt Instruction (Context)</label>
-                    <textarea onchange="patchField(${field.id}, {description: this.value})"
-                              placeholder="Describe this field for the AI..."
-                              rows="1"
-                              class="w-full text-sm text-muted-text bg-gray-50 border-0 rounded-lg p-3 focus:ring-2 focus:ring-brand-red focus:bg-white transition-all outline-none resize-none overflow-hidden"
-                              oninput="this.style.height = ''; this.style.height = this.scrollHeight + 'px'">${field.description || ""}</textarea>
                 </div>
             </div>
         `);
     
-    // Auto-resize textareas on load
-    item.find('textarea').each(function() {
-        this.style.height = this.scrollHeight + 'px';
-    });
-
     list.append(item);
   });
 }
