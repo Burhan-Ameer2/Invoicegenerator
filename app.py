@@ -68,6 +68,20 @@ class SchemaField(db.Model):
             'is_active': self.is_active
         }
 
+class UsageStats(db.Model):
+    __tablename__ = 'usage_stats'
+    id = db.Column(db.Integer, primary_key=True)
+    total_calls = db.Column(db.Integer, default=0)
+    trial_start_date = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'total_calls': self.total_calls,
+            'trial_start_date': self.trial_start_date.isoformat(),
+            'trial_days_remaining': max(0, 7 - (datetime.utcnow() - self.trial_start_date).days),
+            'is_trial_expired': (datetime.utcnow() - self.trial_start_date).days >= 7
+        }
+
 # Initialize Database and Seed Data
 def init_db():
     with app.app_context():
@@ -98,6 +112,12 @@ def init_db():
                 db.session.add(SchemaField(name=name, description=desc))
             db.session.commit()
             logger.info("Database seeded with initial schema fields")
+        
+        # Seed UsageStats if empty
+        if UsageStats.query.count() == 0:
+            db.session.add(UsageStats())
+            db.session.commit()
+            logger.info("Usage statistics initialized")
 
 # Increase timeouts for production
 import socket
@@ -220,7 +240,7 @@ def get_gemini_prompt(fields):
             You are an expert invoice data extractor. Analyze this invoice image carefully and extract the following information WITH confidence scores.
 
             Extract these fields:
-            {field_descriptions}
+            {field_descriptions} 
 
             {rules}
 
@@ -475,7 +495,15 @@ def process_file_parallel(file_path, filename, schema, max_workers=5):
     except Exception as e:
         logger.error(f"Error processing file {filename}: {str(e)}")
         return []
-
+        
+# Usage API
+@app.route('/api/usage', methods=['GET'])
+def get_usage():
+    """Get current usage statistics"""
+    stats = UsageStats.query.first()
+    if not stats:
+        return jsonify({'error': 'Usage statistics not found'}), 404
+    return jsonify(stats.to_dict())
 
 @app.route('/')
 def index():
@@ -559,10 +587,28 @@ def update_schema_session():
     return jsonify({'success': True, 'message': 'Please use /api/fields for permanent changes'})
 
 
+def check_usage_limits():
+    """Check if the trial has expired"""
+    stats = UsageStats.query.first()
+    if not stats:
+        return True, None
+    
+    # Check trial expiration (7 days)
+    if (datetime.utcnow() - stats.trial_start_date).days >= 7:
+        return False, "Your 7-day trial has expired. The application is now unusable."
+        
+    return True, None
+
+
 @app.route('/upload', methods=['POST'])
 def upload_files():
     """Handle file upload and processing"""
     try:
+        # Check usage limits first
+        is_allowed, error_msg = check_usage_limits()
+        if not is_allowed:
+            return jsonify({'error': error_msg}), 403
+
         if 'files[]' not in request.files:
             return jsonify({'error': 'No files uploaded'}), 400
 
@@ -606,6 +652,13 @@ def upload_files():
                 results = process_file_parallel(filepath, filename, current_schema_objects)
                 if results:
                     all_results.extend(results)
+                    
+                    # Increment total calls in database
+                    stats = UsageStats.query.first()
+                    if stats:
+                        stats.total_calls += len(results)
+                        db.session.commit()
+                        
                 try: os.remove(filepath)
                 except: pass
 

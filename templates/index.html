@@ -53,7 +53,38 @@
     </style>
   </head>
 
-  <body class="bg-light-bg text-dark-text font-poppins">
+  <body class="bg-light-bg text-dark-text font-poppins relative">
+    <!-- Trial Expired Overlay -->
+    <div
+      id="trialExpiredOverlay"
+      class="hidden fixed inset-0 bg-gray-900 bg-opacity-95 z-[9999] flex items-center justify-center p-6 backdrop-blur-sm"
+    >
+      <div
+        class="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-10 text-center transform scale-110"
+      >
+        <div
+          class="w-24 h-24 bg-red-100 text-brand-red rounded-full flex items-center justify-center mx-auto mb-6"
+        >
+          <i class="fas fa-clock text-5xl"></i>
+        </div>
+        <h2 class="text-3xl font-bold text-dark-text mb-4">
+          Trial Period Expired
+        </h2>
+        <p class="text-muted-text mb-8 text-lg font-medium">
+          Your 7-day trial has come to an end. To continue using the
+          <span class="text-brand-red font-bold"
+            >Invoice Data Extractor Pro</span
+          >, please contact support for a full license.
+        </p>
+        <button
+          onclick="window.location.reload()"
+          class="w-full bg-brand-red text-white py-4 rounded-xl hover:bg-promo-red transition-all font-bold text-xl shadow-lg hover:shadow-red-200"
+        >
+          Check Status Again
+        </button>
+      </div>
+    </div>
+
     <!-- Header -->
     <header class="bg-brand-red text-white shadow-xl">
       <div class="max-w-7xl mx-auto px-6 py-8">
@@ -258,6 +289,43 @@
               {{ field | replace('_', ' ') }}
             </div>
             {% endfor %}
+          </div>
+
+          <hr class="my-4 border-gray-300" />
+
+          <h3 class="font-bold mb-3 flex items-center gap-2 text-brand-red">
+            <i class="fas fa-chart-line"></i>
+            Usage Stats
+          </h3>
+          <div
+            class="p-4 bg-red-50 rounded-xl border border-red-100 space-y-4 mb-4"
+          >
+            <div class="flex items-center justify-between">
+              <span
+                class="text-xs font-bold text-muted-text uppercase tracking-wider"
+                >Total Extractions</span
+              >
+              <span
+                id="usageTotalCalls"
+                class="text-lg font-bold text-brand-red"
+                >0</span
+              >
+            </div>
+            <div class="space-y-1">
+              <div
+                class="flex items-center justify-between text-[10px] font-bold text-muted-text uppercase"
+              >
+                <span>Trial Progress</span>
+                <span id="trialDaysText">7 Days Left</span>
+              </div>
+              <div class="w-full bg-red-100 rounded-full h-2 overflow-hidden">
+                <div
+                  id="trialProgressBar"
+                  class="bg-brand-red h-2 transition-all duration-500"
+                  style="width: 0%"
+                ></div>
+              </div>
+            </div>
           </div>
 
           <button

@@ -13,7 +13,37 @@ let currentSchema = []; // Will store objects {id, name, description}
 // fetch actual fields from database on load
 $(document).ready(function () {
     fetchFields();
+    fetchUsage();
 });
+
+function fetchUsage() {
+    $.get('/api/usage', function(data) {
+        updateUsageUI(data);
+    });
+}
+
+function updateUsageUI(data) {
+    if (!data) return;
+
+    // Update call counter
+    $("#usageTotalCalls").text(data.total_calls.toLocaleString());
+
+    // Update trial progress
+    const remaining = data.trial_days_remaining;
+    const progress = Math.min(100, ( (7 - remaining) / 7 ) * 100);
+    
+    $("#trialDaysText").text(`${remaining} Day${remaining !== 1 ? 's' : ''} Left`);
+    $("#trialProgressBar").css("width", `${progress}%`);
+
+    // Enforce trial expiration
+    if (data.is_trial_expired) {
+        $("#trialExpiredOverlay").removeClass("hidden");
+        // Disable all buttons and inputs to make it unusable
+        $("button, input, select, textarea").prop("disabled", true);
+        // Special case for our custom browse button
+        $("#uploadZone").addClass("pointer-events-none opacity-50");
+    }
+}
 
 function fetchFields() {
     $.get('/api/fields', function(data) {
@@ -292,6 +322,7 @@ function processFiles() {
           totalInvoices,
           "Processing complete!",
         );
+        fetchUsage(); // Update usage stats after processing
         setTimeout(() => loadInvoices(currentSessionId), 800);
       } else {
         const msg = response?.error || "Processing failed.";
