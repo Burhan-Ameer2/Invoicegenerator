@@ -87,10 +87,18 @@
 
     <!-- Header -->
     <header class="bg-brand-red text-white shadow-xl">
-      <div class="max-w-7xl mx-auto px-6 py-8">
-        <h1 class="text-4xl font-bold tracking-tight flex items-center gap-3">
-          📄 Invoice Data Extractor Pro
+      <div class="max-w-7xl mx-auto px-6 py-6 flex justify-between items-center">
+        <h1 class="text-3xl font-bold tracking-tight flex items-center gap-3">
+          <i class="fas fa-file-invoice-dollar"></i>
+          Invoice Extractor Pro
         </h1>
+        <div class="hidden md:flex items-center gap-2 bg-white/10 px-4 py-2 rounded-full border border-white/20 backdrop-blur-sm">
+          <span class="text-xs font-semibold opacity-80 uppercase tracking-widest">Powered by</span>
+          <a href="https://splashstudio.org/" target="_blank" class="text-sm font-bold hover:text-red-100 transition flex items-center gap-1">
+            Splash Studio
+            <i class="fas fa-external-link-alt text-[10px]"></i>
+          </a>
+        </div>
       </div>
     </header>
 
@@ -579,6 +587,31 @@
         </div>
       </div>
     </div>
+
+    <footer class="bg-white border-t border-gray-200 mt-12 py-10">
+      <div class="max-w-7xl mx-auto px-6 flex flex-col items-center gap-6">
+        <div class="flex items-center gap-3 mb-2">
+          <div class="w-10 h-10 bg-brand-red text-white rounded-lg flex items-center justify-center shadow-lg shadow-red-200">
+            <i class="fas fa-bolt text-xl"></i>
+          </div>
+          <span class="text-xl font-bold text-dark-text">Splash Studio</span>
+        </div>
+        
+        <div class="flex flex-wrap justify-center gap-x-8 gap-y-2 text-sm font-medium text-muted-text">
+          <a href="https://splashstudio.org/" target="_blank" class="hover:text-brand-red transition">Website</a>
+          <a href="#" class="hover:text-brand-red transition">Support</a>
+          <a href="#" class="hover:text-brand-red transition">Privacy Policy</a>
+          <a href="#" class="hover:text-brand-red transition">Terms of Service</a>
+        </div>
+
+        <hr class="w-full max-w-md border-gray-100" />
+
+        <div class="text-center">
+          <p class="text-muted-text text-sm mb-1">© 2026 Invoice Data Extractor Pro. A premium product by Splash Studio.</p>
+          <p class="text-[10px] text-gray-400 font-bold uppercase tracking-[0.2em]">Crafting Digital Excellence</p>
+        </div>
+      </div>
+    </footer>
 
     <!-- Scripts -->
     <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
