@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, jsonify, session
 import pandas as pd
 import fitz  # PyMuPDF
+import random
 from PIL import Image
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -202,55 +203,188 @@ def get_gemini_prompt(fields):
     
     # Static part of the prompt
     rules = """
-            IMPORTANT RULES:
-            1. PRIORITY FOR HANDWRITTEN/MANUAL ADJUSTMENTS: Handwritten values ALWAYS take priority over printed/typed values. This includes:
-               - Handwritten numbers written ABOVE, BELOW, or BESIDE printed values (use the handwritten one)
-               - Handwritten totals, amounts, or corrections anywhere on the invoice
-               - Manual adjustments even if the original printed value is NOT crossed out
-               - Strikethrough text with handwritten replacement
-               - Values written in pen/marker over or near printed numbers
-               - Annotations, adjustments, or corrections in margins or empty spaces
-               - Whiteout/correction fluid with new values written on top
-               If you see BOTH a printed value AND a handwritten value for the same field, ALWAYS use the handwritten one - it represents the final corrected/adjusted amount.
-            2. Return ONLY a valid JSON object, nothing else
-            3. Use YYYY-MM-DD format for dates
-            4. Extract numbers without currency symbols or commas
-            5. If a field is not found or unclear, use null for value and 0 for confidence
-            6. AGGREGATE RELATED FIELDS: While you should extract values as they appear, if there are multiple separate line items for the SAME category (like multiple discounts, returns, or adjustments both handwritten and printed), SUM them up into the single appropriate schema field (e.g., 'Discount').
-            7. HANDLE RETURN/CREDIT FIELDS: Recognize handwritten or printed 'ret', 'return', 'short', 'shortage', or 'credit' as items that represent deductions. Map these to the Return or Discount field as appropriate.
-            8. NUMERIC FORMATS: Interpret numbers in parentheses like (123.45) as potentially negative or credit values if the schema field implies a deduction (like Discount/Return). Also recognize that handwritten values ending in '/-' (e.g., 1600/-) are numeric total amounts.
-            9. PRIORITY FOR EXPLICIT HANDWRITTEN LABELS: If you see handwritten text that explicitly labels a value (e.g., 'Total = 343400/-' or 'Return = 1600/-'), this EXPLICIT label-value pair takes absolute priority over any printed data or other inferred values.
-            10. NUMERIC ID PRECISION (NTN, STRN, GST): Extract these IDs as LITERAL STRINGS with absolute precision. 
-               - DO NOT strip leading zeros (e.g., '0300...' MUST keep the leading '0').
-               - DO NOT skip or group digits. Count them: STRN is typically exactly 13 digits.
-               - Extract EVERY digit one-by-one. If you see '03-00-99999-56-46', read it as '0300999995646'.
-               - EXAMPLE: STRN-0300999995646 means Supplier_Registration_No = "0300999995646" (exactly 13 digits with five 9s)
-            11. IDENTICAL DIGIT SEQUENCES: For sequences of identical digits (like '99999' or '00000'), COUNT EACH DIGIT INDIVIDUALLY. Do not estimate. The number 99999 has FIVE 9s, not four. Read: nine-nine-nine-nine-nine. Verify your extracted string has the exact same length as the original.
-            12. ID FIELD IDENTIFICATION: Look for labels like 'STRN', 'NTN', 'G.S.T', or 'Sales Tax Reg No'. Map these to the registration fields even if the labels vary.
-            13. ANTI-HALLUCINATION: Strictly extract ONLY what is explicitly visible. If a value is missing or illegible, use null. Never guess or infer values.
-            14. LANGUAGE PRESERVATION: Extract text in ORIGINAL language/script (e.g., Urdu, Arabic). Do NOT translate or transliterate.
-            15. Do NOT include any explanations or text outside the JSON
-            
-            AUDITING & CONSISTENCY:
-            16. MATHEMATICAL CROSS-CHECK: Internally verify your extraction by checking if (Exclusive_Value + GST_Sales_Tax - Discount - Incentive) equals the final Net_Amount. If it doesn't match, re-scan the invoice for additional handwritten adjustments, deductions (like 'less short'), or corrections that you might have missed. 
-            17. AGGREGATE ADJUSTMENTS: If an invoice has a percentage discount (e.g., 'less 20%') AND a separate adjustment (e.g., 'less short'), SUM BOTH into the 'Discount' field to ensure the final total is mathematically correct.
-            
-            CONFIDENCE SCORING:
-            18. For EACH field, provide a confidence score from 0 to 100 indicating how certain you are about the extraction:
-                - 85-100: High confidence - value is clearly visible and unambiguous
-                - 60-84: Medium confidence - value is readable but may have minor uncertainties
-                - 0-59: Low confidence - value is unclear, partially visible, or you're uncertain
-            19. Use the exact JSON structure shown in the example below with "value" and "confidence" for each field
+        IMPORTANT RULES:
+1. PRIORITY FOR HANDWRITTEN/MANUAL ADJUSTMENTS: Handwritten values ALWAYS take priority over printed/typed values. This includes:
+   - Handwritten numbers written ABOVE, BELOW, or BESIDE printed values (use the handwritten one)
+   - Handwritten totals, amounts, or corrections anywhere on the invoice
+   - Manual adjustments even if the original printed value is NOT crossed out
+   - Strikethrough text with handwritten replacement
+   - Values written in pen/marker over or near printed numbers
+   - Annotations, adjustments, or corrections in margins or empty spaces
+   - Whiteout/correction fluid with new values written on top
+   If you see BOTH a printed value AND a handwritten value for the same field, ALWAYS use the handwritten one - it represents the final corrected/adjusted amount.
+
+2. Return ONLY a valid JSON object, nothing else
+3. Use YYYY-MM-DD format for dates
+4. Extract numbers without currency symbols or commas
+5. If a field is not found or unclear, use null for value and 0 for confidence
+
+6. AGGREGATE RELATED FIELDS: While you should extract values as they appear, if there are multiple separate line items for the SAME category (like multiple discounts, returns, or adjustments both handwritten and printed), SUM them up into the single appropriate schema field (e.g., 'Discount').
+
+7. HANDLE RETURN/CREDIT FIELDS: Recognize handwritten or printed 'ret', 'return', 'short', 'shortage', or 'credit' as items that represent deductions. Map these to the Return or Discount field as appropriate.
+
+8. NUMERIC FORMATS: Interpret numbers in parentheses like (123.45) as potentially negative or credit values if the schema field implies a deduction (like Discount/Return). Also recognize that handwritten values ending in '/-' (e.g., 1600/-) are numeric total amounts.
+
+9. PRIORITY FOR EXPLICIT HANDWRITTEN LABELS: If you see handwritten text that explicitly labels a value (e.g., 'Total = 343400/-' or 'Return = 1600/-'), this EXPLICIT label-value pair takes absolute priority over any printed data or other inferred values.
+
+10. NUMERIC ID PRECISION (NTN, STRN, GST): Extract these IDs as LITERAL STRINGS with absolute precision. 
+   - DO NOT strip leading zeros (e.g., '0300...' MUST keep the leading '0').
+   - DO NOT skip or group digits. Count them: STRN is typically exactly 13 digits.
+   - Extract EVERY digit one-by-one. If you see '03-00-99999-56-46', read it as '0300999995646'.
+   - EXAMPLE: STRN-0300999995646 means Supplier_Registration_No = "0300999995646" (exactly 13 digits with five 9s)
+
+11. IDENTICAL DIGIT SEQUENCES: For sequences of identical digits (like '99999' or '00000'), COUNT EACH DIGIT INDIVIDUALLY. Do not estimate. The number 99999 has FIVE 9s, not four. Read: nine-nine-nine-nine-nine. Verify your extracted string has the exact same length as the original.
+
+12. ID FIELD IDENTIFICATION: Look for labels like 'STRN', 'NTN', 'G.S.T', or 'Sales Tax Reg No'. Map these to the registration fields even if the labels vary.
+
+13. ANTI-HALLUCINATION: Strictly extract ONLY what is explicitly visible. If a value is missing or illegible, use null. Never guess or infer values.
+
+14. LANGUAGE PRESERVATION: Extract text in ORIGINAL language/script (e.g., Urdu, Arabic). Do NOT translate or transliterate.
+
+15. Do NOT include any explanations or text outside the JSON
+
+AUDITING & CONSISTENCY:
+16. MATHEMATICAL CROSS-CHECK: Internally verify your extraction by checking if (Exclusive_Value + GST_Sales_Tax - Discount - Incentive) equals the final Net_Amount. If it doesn't match, re-scan the invoice for additional handwritten adjustments, deductions (like 'less short'), or corrections that you might have missed. 
+
+17. AGGREGATE ADJUSTMENTS: If an invoice has a percentage discount (e.g., 'less 20%') AND a separate adjustment (e.g., 'less short'), SUM BOTH into the 'Discount' field to ensure the final total is mathematically correct.
+
+=== CRITICAL BLUR DETECTION & CONFIDENCE RULES ===
+
+18. **TWO-PHASE APPROACH - VALUE EXTRACTION vs CONFIDENCE SCORING**:
+   
+   **PHASE 1 - VALUE EXTRACTION** (Be thorough and extract what you see):
+   - Extract the value that appears on the invoice, even if slightly blurry
+   - Use context clues, mathematical relationships, and invoice structure to determine the correct value
+   - Apply all the priority rules (handwritten over printed, aggregation, etc.)
+   - Extract the most likely correct value based on all available evidence
+   
+   **PHASE 2 - CONFIDENCE SCORING** (Be strict about image quality):
+   - AFTER extracting the value, separately assess the visual clarity
+   - Confidence score reflects ONLY the image quality of that specific field
+   - Even if you're certain of the value (from context), if it's blurry → low confidence
+
+19. **CONFIDENCE SCORING BASED ON VISUAL CLARITY ONLY**:
+
+   **90-100% confidence** - Only if:
+   - Every character has sharp, crisp edges
+   - Zero blur or pixelation
+   - Perfect clarity on all characters
+   
+   **70-89% confidence** - Only if:
+   - Text is clear and readable with minor printing artifacts
+   - All characters are distinguishable
+   - Slight imperfections but no actual blur
+   
+   **50-69% confidence** - Only if:
+   - Text is readable but shows some softness
+   - Characters are distinguishable but not perfectly sharp
+   - Minor blur but structure is clear
+   
+   **30-49% confidence** - If:
+   - Noticeable blur on multiple characters
+   - Text is somewhat fuzzy but you can make out the value
+   - Using context/pattern recognition to assist reading
+   
+   **0-29% confidence** - If:
+   - Severe blur or pixelation
+   - Heavy compression artifacts
+   - Characters are very difficult to distinguish
+   - Significant uncertainty about individual characters
+
+20. **BLUR INDICATORS - CONFIDENCE ADJUSTMENTS**:
+   If you observe these visual issues, reduce confidence accordingly:
+   - Fuzzy/soft edges → confidence MAX 50%
+   - Noticeable pixelation → confidence MAX 40%
+   - JPEG compression artifacts → confidence MAX 40%
+   - Characters bleeding or smudged → confidence MAX 35%
+   - Severe blur where you're pattern-matching → confidence MAX 25%
+
+21. **ANTI-PATTERN-RECOGNITION WARNING**:
+   If you recognize a word/number by its overall shape but individual characters are blurry:
+   - STILL extract the value (you're probably correct)
+   - BUT set confidence ≤ 40% (reflects actual image quality)
+   
+   Example: You see blurry text that looks like "INVOICE"
+   - value: "INVOICE" (extract it)
+   - confidence: 30 (because it's blurry)
+   - visual_clarity: "Slightly Blurry"
+
+22. **VISUAL CLARITY FIELD** (Mandatory):
+   Rate the visual quality of each field:
+   - "Crisp" → Sharp, clear text
+   - "Readable" → Clear enough to read without strain
+   - "Slightly Blurry" → Some blur but recognizable
+   - "Very Blurry/Pixelated" → Significant quality issues
+   - "Missing" → Field not present
+
+23. **VISUAL EVIDENCE** (Required if confidence > 50%):
+   Describe what makes you confident:
+   - For crisp text: "Sharp edges on all characters, clear serifs on T"
+   - For readable text: "All digits clearly distinguishable, minor print artifacts"
+   - For blurry text with >50% confidence: "Text is soft but all characters identifiable"
+
+24. **MATHEMATICAL CONSISTENCY HELPS VALUE, NOT CONFIDENCE**:
+   - If a blurry number mathematically fits the invoice total → extract that value
+   - BUT still score confidence low based on the blur
+   - Mathematical validation helps you extract the RIGHT value, but doesn't change the fact that the source is blurry
+
+25. **PRACTICAL EXAMPLES**:
+
+   Example 1: Blurry total amount
+   - The number is blurry but matches the sum of line items
+   - value: "15000" (extract it, math confirms it)
+   - confidence: 35 (it's blurry)
+   - visual_clarity: "Slightly Blurry"
+   - visual_evidence: "Characters are soft but recognizable, math validation supports value"
+   
+   Example 2: Clear printed text
+   - Sharp, crisp printing
+   - value: "ACME Corporation"
+   - confidence: 95 (perfectly clear)
+   - visual_clarity: "Crisp"
+   - visual_evidence: "All characters have sharp edges, clear spacing"
+   
+   Example 3: Severely pixelated date
+   - Date is very blurry but format suggests 2024-01-15
+   - value: "2024-01-15" (extract best guess)
+   - confidence: 20 (severe pixelation)
+   - visual_clarity: "Very Blurry/Pixelated"
+   - visual_evidence: "Heavy pixelation, relying on date format pattern"
+
+26. **KEY PRINCIPLE**:
+   ✓ Extract the CORRECT value (use all context and rules)
+   ✓ Score confidence based ONLY on visual clarity
+   ✓ Be thorough in extraction, strict in confidence scoring
+
+27. **JSON STRUCTURE**:
+```json
+   {
+     "field_name": {
+       "value": "extracted_value_or_null",
+       "confidence": 0-100,
+       "visual_clarity": "Crisp|Readable|Slightly Blurry|Very Blurry/Pixelated|Missing",
+       "visual_evidence": "Description of visual quality and what you can see"
+     }
+   }
+```
+
+=== END CRITICAL BLUR DETECTION RULES ===
+
+REMEMBER: 
+- Extract values thoroughly and accurately using all available information
+- Score confidence strictly based on image quality alone
+- A correct value from a blurry source still gets low confidence
+- Your job is to extract the RIGHT value AND honestly report how clear it was to read
             """
     
     # Build example with confidence structure
     example_fields = fields[:2] if len(fields) >= 2 else fields
-    example_json = {f.name: {"value": "extracted_value", "confidence": 95} for f in example_fields}
+    example_json = {f.name: {"value": "extracted_value", "confidence": 95, "visual_clarity": "Crisp", "visual_evidence": "Sharp edges on all letters"} for f in example_fields}
     if not example_json: 
-        example_json = {"Field_Name": {"value": "extracted_value", "confidence": 95}}
+        example_json = {"Field_Name": {"value": "extracted_value", "confidence": 95, "visual_clarity": "Crisp", "visual_evidence": "Sharp edges"}}
 
     return f"""
-            You are an expert invoice data extractor. Analyze this invoice image carefully and extract the following information WITH confidence scores.
+            You are an expert invoice data extractor. Analyze this invoice image carefully and extract the following information WITH confidence scores and specific visual evidence.
 
             Extract these fields:
             {field_descriptions} 
@@ -260,7 +394,27 @@ def get_gemini_prompt(fields):
             REQUIRED JSON response format (use this exact structure):
             {json.dumps(example_json, indent=12)}
             
-            Each field MUST have "value" and "confidence" (0-100) keys.
+            Each field MUST have "value", "confidence" (0-100), "visual_clarity", and "visual_evidence" keys.
+            """
+    
+    # Build example with confidence structure
+    example_fields = fields[:2] if len(fields) >= 2 else fields
+    example_json = {f.name: {"value": "extracted_value", "confidence": 95, "visual_clarity": "Crisp"} for f in example_fields}
+    if not example_json: 
+        example_json = {"Field_Name": {"value": "extracted_value", "confidence": 95, "visual_clarity": "Crisp"}}
+
+    return f"""
+            You are an expert invoice data extractor. Analyze this invoice image carefully and extract the following information WITH confidence scores and visual clarity assessments.
+
+            Extract these fields:
+            {field_descriptions} 
+
+            {rules}
+
+            REQUIRED JSON response format (use this exact structure):
+            {json.dumps(example_json, indent=12)}
+            
+            Each field MUST have "value", "confidence" (0-100), and "visual_clarity" keys.
             """
 
 def save_session_to_disk(session_id, data):
@@ -334,7 +488,7 @@ def image_to_base64(image):
     return base64.b64encode(img_byte_arr.read()).decode('utf-8')
 
 
-def extract_invoice_data_with_gemini(image, schema, max_retries=3):
+def extract_invoice_data_with_gemini(image, schema, max_retries=5):
     """Use Gemini Vision to extract invoice data with confidence scores and retry logic"""
 
     last_error = None
@@ -404,13 +558,37 @@ def extract_invoice_data_with_gemini(image, schema, max_retries=3):
                     filtered_data[field.name] = None
                     confidence_scores[field.name] = 0
                 elif isinstance(field_data, dict) and 'value' in field_data:
-                    # New format with confidence
-                    filtered_data[field.name] = field_data.get('value')
-                    confidence_scores[field.name] = field_data.get('confidence', 0)
+                    # New format with confidence, visual clarity, and evidence
+                    val = field_data.get('value')
+                    conf = field_data.get('confidence', 0)
+                    clarity = str(field_data.get('visual_clarity', 'Crisp')).lower()
+                    evidence = str(field_data.get('visual_evidence', '')).lower()
+                    
+                    # PHASE 5 STRICT ENFORCEMENT
+                    # 1. Check clarity cap
+                    if "blurry" in clarity or "pixelated" in clarity:
+                        if "very" in clarity:
+                            conf = min(conf, 20)
+                        else:
+                            conf = min(conf, 40)
+                    
+                    # 2. Check evidence quality
+                    generic_evidence = ["looks", "okay", "good", "readable", "crisp", "clear"]
+                    is_generic = all(word in generic_evidence for word in evidence.split()) or len(evidence) < 10
+                    
+                    if conf > 50 and is_generic:
+                        logger.warning(f"Downgrading confidence for {field.name} due to generic evidence: '{evidence}'")
+                        conf = 35 # Penalize lack of specific detail
+                    
+                    if val is None or val == "":
+                        conf = 0
+                    
+                    filtered_data[field.name] = val
+                    confidence_scores[field.name] = conf
                 else:
-                    # Fallback: Old format without confidence (backward compatibility)
+                    # Fallback
                     filtered_data[field.name] = field_data
-                    confidence_scores[field.name] = 75  # Assume medium confidence for old format
+                    confidence_scores[field.name] = 75 
             
             # Calculate overall confidence score (average of all fields with values)
             valid_scores = [score for fname, score in confidence_scores.items() 
@@ -432,12 +610,19 @@ def extract_invoice_data_with_gemini(image, schema, max_retries=3):
             # Check for quota/rate limit errors
             if any(keyword in error_str for keyword in ['quota', 'rate limit', 'resource exhausted', '429']):
                 if attempt < max_retries - 1:
-                    time.sleep(5 * (attempt + 1))
+                    # Exponential backoff: 2s, 4s, 8s, 16s, 32s...
+                    base_delay = 2 * (2 ** attempt)
+                    # Add jitter: +/- 500ms
+                    jitter = random.uniform(0, 1)
+                    sleep_time = base_delay + jitter
+                    
+                    logger.warning(f"Rate limit hit. Sleeping for {sleep_time:.2f}s before retry.")
+                    time.sleep(sleep_time)
                     continue
                 else:
                     return None
 
-            # Retry with backoff
+            # Retry with milder backoff for other errors
             if attempt < max_retries - 1:
                 time.sleep(2 * (attempt + 1))
                 continue
@@ -564,6 +749,16 @@ def get_fields():
     """API endpoint to get all fields"""
     fields = SchemaField.query.order_by(SchemaField.created_at).all()
     return jsonify([f.to_dict() for f in fields])
+
+@app.route('/api/prompt-preview', methods=['GET'])
+def preview_prompt():
+    """API endpoint to preview the actual Gemini prompt with current fields"""
+    try:
+        fields = get_current_fields()
+        prompt = get_gemini_prompt(fields)
+        return jsonify({'prompt': prompt})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/fields', methods=['POST'])
