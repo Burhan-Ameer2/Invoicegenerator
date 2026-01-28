@@ -20,6 +20,7 @@ import pickle
 from pathlib import Path
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import inspect
+from types import SimpleNamespace
 
 # Load environment variables
 load_dotenv()
@@ -715,19 +716,48 @@ def upload_files():
                     all_results = []
                     current_schema_objects = get_current_fields()
                     
-                    for filepath, original_filename in files_to_process:
-                        results = process_file_parallel(filepath, original_filename, current_schema_objects, sid)
-                        if results:
-                            all_results.extend(results)
-                            
-                            # Increment total calls in database
-                            stats = UsageStats.query.first()
-                            if stats:
-                                stats.total_calls += len(results)
-                                db.session.commit()
-                                
-                        try: os.remove(filepath)
-                        except: pass
+                    # Convert to simple objects to avoid "Working outside of application context" 
+                    # errors in threads when accessing SQLAlchemy objects
+                    safe_schema_objects = [
+                        SimpleNamespace(name=f.name, description=f.description) 
+                        for f in current_schema_objects
+                    ]
+                    
+                    # Use ThreadPoolExecutor for parallel file processing
+                    # We use max_workers=5 to match the page processing limit
+                    with ThreadPoolExecutor(max_workers=5) as executor:
+                        # Submit all file processing tasks
+                        future_to_file = {
+                            executor.submit(
+                                process_file_parallel, 
+                                filepath, 
+                                original_filename, 
+                                safe_schema_objects, 
+                                sid
+                            ): (filepath, original_filename)
+                            for filepath, original_filename in files_to_process
+                        }
+
+                        # Collect results as they complete
+                        for future in as_completed(future_to_file):
+                            filepath, original_filename = future_to_file[future]
+                            try:
+                                results = future.result()
+                                if results:
+                                    all_results.extend(results)
+                                    
+                                    # Increment total calls in database
+                                    # This runs in the main background thread, so it's safe to use db.session
+                                    stats = UsageStats.query.first()
+                                    if stats:
+                                        stats.total_calls += len(results)
+                                        db.session.commit()
+                            except Exception as e:
+                                logger.error(f"Error processing file {original_filename}: {str(e)}")
+                            finally:
+                                # Clean up temp file immediately after processing
+                                try: os.remove(filepath)
+                                except: pass
 
                     with processed_invoices_lock:
                         processed_invoices[sid] = all_results

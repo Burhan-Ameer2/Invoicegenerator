@@ -2,7 +2,7 @@ import requests
 import time
 import os
 
-BASE_URL = "http://127.0.0.1:7000"
+BASE_URL = "http://127.0.0.1:8081"
 
 def test_usage_limit():
     print("Checking usage stats...")
