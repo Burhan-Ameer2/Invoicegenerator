@@ -241,10 +241,12 @@ def get_gemini_prompt(fields):
             17. AGGREGATE ADJUSTMENTS: If an invoice has a percentage discount (e.g., 'less 20%') AND a separate adjustment (e.g., 'less short'), SUM BOTH into the 'Discount' field to ensure the final total is mathematically correct.
             
             24. **VISUAL CLARITY FIELD**: For EVERY field, you must also provide a "visual_clarity" string. 
-                - Use ONLY these values: "Crisp", "Readable", "Slightly Blurry", "Very Blurry/Pixelated", or "Missing".
-            25. **VISUAL EVIDENCE REQUIREMENT (PHASE 5)**: For any field with >50% confidence, you MUST provide a "visual_evidence" string describing specific ink strokes or character features (e.g., "Sharp capital B, clear loop in P"). 
+            - Use ONLY these values: "Crisp", "Readable", "Slightly Blurry", "Very Blurry/Pixelated", or "Missing".
+            25. **VISUAL EVIDENCE REQUIREMENT**: For any field with >50% confidence, you MUST provide a "visual_evidence" string describing specific ink strokes or character features (e.g., "Sharp capital B, clear loop in P"). 
             26. **HALLUCINATION TRAP**: Ignore your knowledge of common names or words. If you recognize name "john" but cannot see the individual characters as sharp, distinct shapes, you MUST report "Very Blurry/Pixelated" and confidence <= 20%.
-            27. Use the exact JSON structure shown in the example below with "value", "confidence", "visual_clarity", and "visual_evidence" for each field.            """
+            27. **STRICT ID CONFIDENCE (GST/NTN/STRN)**: If any digit in a GST, NTN, or STRN number is missing, unreadable, or "guessed" based on surrounding digits, you MUST set confidence to 50% or less. High confidence (90%+) is ONLY allowed if EVERY digit is clearly visible and crisp.
+            28. **BLURRY IMAGE CAP**: If the image or a specific field is "Slightly Blurry", the MAXIMUM allowed confidence is 70%. If it is "Very Blurry/Pixelated", the MAXIMUM allowed confidence is 30%, regardless of how sure you feel about the extraction.
+            29. Use the exact JSON structure shown in the example below with "value", "confidence", "visual_clarity", and "visual_evidence" for each field.            """
     
     # Build example with confidence structure
     example_fields = fields[:2] if len(fields) >= 2 else fields
@@ -264,26 +266,6 @@ def get_gemini_prompt(fields):
             {json.dumps(example_json, indent=12)}
             
             Each field MUST have "value", "confidence" (0-100), "visual_clarity", and "visual_evidence" keys.
-            """
-    
-    # Build example with confidence structure
-    example_fields = fields[:2] if len(fields) >= 2 else fields
-    example_json = {f.name: {"value": "extracted_value", "confidence": 95, "visual_clarity": "Crisp"} for f in example_fields}
-    if not example_json: 
-        example_json = {"Field_Name": {"value": "extracted_value", "confidence": 95, "visual_clarity": "Crisp"}}
-
-    return f"""
-            You are an expert invoice data extractor. Analyze this invoice image carefully and extract the following information WITH confidence scores and visual clarity assessments.
-
-            Extract these fields:
-            {field_descriptions} 
-
-            {rules}
-
-            REQUIRED JSON response format (use this exact structure):
-            {json.dumps(example_json, indent=12)}
-            
-            Each field MUST have "value", "confidence" (0-100), and "visual_clarity" keys.
             """
 
 def save_session_to_disk(session_id, data):
@@ -437,18 +419,28 @@ def extract_invoice_data_with_gemini(image, schema, max_retries=5):
                     # 1. Check clarity cap
                     if "blurry" in clarity or "pixelated" in clarity:
                         if "very" in clarity:
-                            conf = min(conf, 20)
+                            conf = min(conf, 30) # Strict cap for very blurry
                         else:
-                            conf = min(conf, 40)
+                            conf = min(conf, 50) # Strict cap for slightly blurry
                     
                     # 2. Check evidence quality
-                    generic_evidence = ["looks", "okay", "good", "readable", "crisp", "clear"]
-                    is_generic = all(word in generic_evidence for word in evidence.split()) or len(evidence) < 10
+                    generic_evidence = ["looks", "okay", "good", "readable", "crisp", "clear", "visible", "readable text"]
+                    evidence_words = evidence.lower().split()
+                    is_generic = all(word in generic_evidence for word in evidence_words) or len(evidence) < 15
                     
                     if conf > 50 and is_generic:
                         logger.warning(f"Downgrading confidence for {field.name} due to generic evidence: '{evidence}'")
-                        conf = 35 # Penalize lack of specific detail
+                        conf = min(conf, 45) # Penalize lack of specific detail
                     
+                    # 3. ID Field Length Check (Heuristic)
+                    # GST and STRN are usually 13-15 digits. If shorter, it's likely incomplete.
+                    id_keywords = ['gst', 'strn', 'registration', 'ntn']
+                    if any(keyword in field.name.lower() for keyword in id_keywords) and val:
+                        digits_only = re.sub(r'\D', '', str(val))
+                        if digits_only and len(digits_only) < 7: # NTN can be 7-8 digits, GST 13+
+                             logger.warning(f"Downgrading confidence for ID field {field.name} due to short length: {val}")
+                             conf = min(conf, 50)
+
                     if val is None or val == "":
                         conf = 0
                     
