@@ -145,6 +145,10 @@ logger.info(f"Max invoices per session: {MAX_INVOICES_PER_SESSION if MAX_INVOICE
 MAX_TRIAL_INVOICES = int(os.getenv('MAX_TRIAL_INVOICES', 1000))
 logger.info(f"Max trial invoices: {MAX_TRIAL_INVOICES}")
 
+# Get max parallel workers for processing
+MAX_WORKERS = int(os.getenv('MAX_WORKERS', 5))
+logger.info(f"Max parallel workers: {MAX_WORKERS}")
+
 # INVOICE_SCHEMA is now dynamic and stored in the database
 def get_current_fields():
     """Fetch active fields from database"""
@@ -203,179 +207,44 @@ def get_gemini_prompt(fields):
     
     # Static part of the prompt
     rules = """
-        IMPORTANT RULES:
-1. PRIORITY FOR HANDWRITTEN/MANUAL ADJUSTMENTS: Handwritten values ALWAYS take priority over printed/typed values. This includes:
-   - Handwritten numbers written ABOVE, BELOW, or BESIDE printed values (use the handwritten one)
-   - Handwritten totals, amounts, or corrections anywhere on the invoice
-   - Manual adjustments even if the original printed value is NOT crossed out
-   - Strikethrough text with handwritten replacement
-   - Values written in pen/marker over or near printed numbers
-   - Annotations, adjustments, or corrections in margins or empty spaces
-   - Whiteout/correction fluid with new values written on top
-   If you see BOTH a printed value AND a handwritten value for the same field, ALWAYS use the handwritten one - it represents the final corrected/adjusted amount.
-
-2. Return ONLY a valid JSON object, nothing else
-3. Use YYYY-MM-DD format for dates
-4. Extract numbers without currency symbols or commas
-5. If a field is not found or unclear, use null for value and 0 for confidence
-
-6. AGGREGATE RELATED FIELDS: While you should extract values as they appear, if there are multiple separate line items for the SAME category (like multiple discounts, returns, or adjustments both handwritten and printed), SUM them up into the single appropriate schema field (e.g., 'Discount').
-
-7. HANDLE RETURN/CREDIT FIELDS: Recognize handwritten or printed 'ret', 'return', 'short', 'shortage', or 'credit' as items that represent deductions. Map these to the Return or Discount field as appropriate.
-
-8. NUMERIC FORMATS: Interpret numbers in parentheses like (123.45) as potentially negative or credit values if the schema field implies a deduction (like Discount/Return). Also recognize that handwritten values ending in '/-' (e.g., 1600/-) are numeric total amounts.
-
-9. PRIORITY FOR EXPLICIT HANDWRITTEN LABELS: If you see handwritten text that explicitly labels a value (e.g., 'Total = 343400/-' or 'Return = 1600/-'), this EXPLICIT label-value pair takes absolute priority over any printed data or other inferred values.
-
-10. NUMERIC ID PRECISION (NTN, STRN, GST): Extract these IDs as LITERAL STRINGS with absolute precision. 
-   - DO NOT strip leading zeros (e.g., '0300...' MUST keep the leading '0').
-   - DO NOT skip or group digits. Count them: STRN is typically exactly 13 digits.
-   - Extract EVERY digit one-by-one. If you see '03-00-99999-56-46', read it as '0300999995646'.
-   - EXAMPLE: STRN-0300999995646 means Supplier_Registration_No = "0300999995646" (exactly 13 digits with five 9s)
-
-11. IDENTICAL DIGIT SEQUENCES: For sequences of identical digits (like '99999' or '00000'), COUNT EACH DIGIT INDIVIDUALLY. Do not estimate. The number 99999 has FIVE 9s, not four. Read: nine-nine-nine-nine-nine. Verify your extracted string has the exact same length as the original.
-
-12. ID FIELD IDENTIFICATION: Look for labels like 'STRN', 'NTN', 'G.S.T', or 'Sales Tax Reg No'. Map these to the registration fields even if the labels vary.
-
-13. ANTI-HALLUCINATION: Strictly extract ONLY what is explicitly visible. If a value is missing or illegible, use null. Never guess or infer values.
-
-14. LANGUAGE PRESERVATION: Extract text in ORIGINAL language/script (e.g., Urdu, Arabic). Do NOT translate or transliterate.
-
-15. Do NOT include any explanations or text outside the JSON
-
-AUDITING & CONSISTENCY:
-16. MATHEMATICAL CROSS-CHECK: Internally verify your extraction by checking if (Exclusive_Value + GST_Sales_Tax - Discount - Incentive) equals the final Net_Amount. If it doesn't match, re-scan the invoice for additional handwritten adjustments, deductions (like 'less short'), or corrections that you might have missed. 
-
-17. AGGREGATE ADJUSTMENTS: If an invoice has a percentage discount (e.g., 'less 20%') AND a separate adjustment (e.g., 'less short'), SUM BOTH into the 'Discount' field to ensure the final total is mathematically correct.
-
-=== CRITICAL BLUR DETECTION & CONFIDENCE RULES ===
-
-18. **TWO-PHASE APPROACH - VALUE EXTRACTION vs CONFIDENCE SCORING**:
-   
-   **PHASE 1 - VALUE EXTRACTION** (Be thorough and extract what you see):
-   - Extract the value that appears on the invoice, even if slightly blurry
-   - Use context clues, mathematical relationships, and invoice structure to determine the correct value
-   - Apply all the priority rules (handwritten over printed, aggregation, etc.)
-   - Extract the most likely correct value based on all available evidence
-   
-   **PHASE 2 - CONFIDENCE SCORING** (Be strict about image quality):
-   - AFTER extracting the value, separately assess the visual clarity
-   - Confidence score reflects ONLY the image quality of that specific field
-   - Even if you're certain of the value (from context), if it's blurry → low confidence
-
-19. **CONFIDENCE SCORING BASED ON VISUAL CLARITY ONLY**:
-
-   **90-100% confidence** - Only if:
-   - Every character has sharp, crisp edges
-   - Zero blur or pixelation
-   - Perfect clarity on all characters
-   
-   **70-89% confidence** - Only if:
-   - Text is clear and readable with minor printing artifacts
-   - All characters are distinguishable
-   - Slight imperfections but no actual blur
-   
-   **50-69% confidence** - Only if:
-   - Text is readable but shows some softness
-   - Characters are distinguishable but not perfectly sharp
-   - Minor blur but structure is clear
-   
-   **30-49% confidence** - If:
-   - Noticeable blur on multiple characters
-   - Text is somewhat fuzzy but you can make out the value
-   - Using context/pattern recognition to assist reading
-   
-   **0-29% confidence** - If:
-   - Severe blur or pixelation
-   - Heavy compression artifacts
-   - Characters are very difficult to distinguish
-   - Significant uncertainty about individual characters
-
-20. **BLUR INDICATORS - CONFIDENCE ADJUSTMENTS**:
-   If you observe these visual issues, reduce confidence accordingly:
-   - Fuzzy/soft edges → confidence MAX 50%
-   - Noticeable pixelation → confidence MAX 40%
-   - JPEG compression artifacts → confidence MAX 40%
-   - Characters bleeding or smudged → confidence MAX 35%
-   - Severe blur where you're pattern-matching → confidence MAX 25%
-
-21. **ANTI-PATTERN-RECOGNITION WARNING**:
-   If you recognize a word/number by its overall shape but individual characters are blurry:
-   - STILL extract the value (you're probably correct)
-   - BUT set confidence ≤ 40% (reflects actual image quality)
-   
-   Example: You see blurry text that looks like "INVOICE"
-   - value: "INVOICE" (extract it)
-   - confidence: 30 (because it's blurry)
-   - visual_clarity: "Slightly Blurry"
-
-22. **VISUAL CLARITY FIELD** (Mandatory):
-   Rate the visual quality of each field:
-   - "Crisp" → Sharp, clear text
-   - "Readable" → Clear enough to read without strain
-   - "Slightly Blurry" → Some blur but recognizable
-   - "Very Blurry/Pixelated" → Significant quality issues
-   - "Missing" → Field not present
-
-23. **VISUAL EVIDENCE** (Required if confidence > 50%):
-   Describe what makes you confident:
-   - For crisp text: "Sharp edges on all characters, clear serifs on T"
-   - For readable text: "All digits clearly distinguishable, minor print artifacts"
-   - For blurry text with >50% confidence: "Text is soft but all characters identifiable"
-
-24. **MATHEMATICAL CONSISTENCY HELPS VALUE, NOT CONFIDENCE**:
-   - If a blurry number mathematically fits the invoice total → extract that value
-   - BUT still score confidence low based on the blur
-   - Mathematical validation helps you extract the RIGHT value, but doesn't change the fact that the source is blurry
-
-25. **PRACTICAL EXAMPLES**:
-
-   Example 1: Blurry total amount
-   - The number is blurry but matches the sum of line items
-   - value: "15000" (extract it, math confirms it)
-   - confidence: 35 (it's blurry)
-   - visual_clarity: "Slightly Blurry"
-   - visual_evidence: "Characters are soft but recognizable, math validation supports value"
-   
-   Example 2: Clear printed text
-   - Sharp, crisp printing
-   - value: "ACME Corporation"
-   - confidence: 95 (perfectly clear)
-   - visual_clarity: "Crisp"
-   - visual_evidence: "All characters have sharp edges, clear spacing"
-   
-   Example 3: Severely pixelated date
-   - Date is very blurry but format suggests 2024-01-15
-   - value: "2024-01-15" (extract best guess)
-   - confidence: 20 (severe pixelation)
-   - visual_clarity: "Very Blurry/Pixelated"
-   - visual_evidence: "Heavy pixelation, relying on date format pattern"
-
-26. **KEY PRINCIPLE**:
-   ✓ Extract the CORRECT value (use all context and rules)
-   ✓ Score confidence based ONLY on visual clarity
-   ✓ Be thorough in extraction, strict in confidence scoring
-
-27. **JSON STRUCTURE**:
-```json
-   {
-     "field_name": {
-       "value": "extracted_value_or_null",
-       "confidence": 0-100,
-       "visual_clarity": "Crisp|Readable|Slightly Blurry|Very Blurry/Pixelated|Missing",
-       "visual_evidence": "Description of visual quality and what you can see"
-     }
-   }
-```
-
-=== END CRITICAL BLUR DETECTION RULES ===
-
-REMEMBER: 
-- Extract values thoroughly and accurately using all available information
-- Score confidence strictly based on image quality alone
-- A correct value from a blurry source still gets low confidence
-- Your job is to extract the RIGHT value AND honestly report how clear it was to read
-            """
+    IMPORTANT RULES:
+            1. PRIORITY FOR HANDWRITTEN/MANUAL ADJUSTMENTS: Handwritten values ALWAYS take priority over printed/typed values. This includes:
+               - Handwritten numbers written ABOVE, BELOW, or BESIDE printed values (use the handwritten one)
+               - Handwritten totals, amounts, or corrections anywhere on the invoice
+               - Manual adjustments even if the original printed value is NOT crossed out
+               - Strikethrough text with handwritten replacement
+               - Values written in pen/marker over or near printed numbers
+               - Annotations, adjustments, or corrections in margins or empty spaces
+               - Whiteout/correction fluid with new values written on top
+               If you see BOTH a printed value AND a handwritten value for the same field, ALWAYS use the handwritten one - it represents the final corrected/adjusted amount.
+            2. Return ONLY a valid JSON object, nothing else
+            3. Use YYYY-MM-DD format for dates
+            4. Extract numbers without currency symbols or commas
+            5. If a field is not found or unclear, use null for value and 0 for confidence
+            6. AGGREGATE RELATED FIELDS: While you should extract values as they appear, if there are multiple separate line items for the SAME category (like multiple discounts, returns, or adjustments both handwritten and printed), SUM them up into the single appropriate schema field (e.g., 'Discount').
+            7. HANDLE RETURN/CREDIT FIELDS: Recognize handwritten or printed 'ret', 'return', 'short', 'shortage', or 'credit' as items that represent deductions. Map these to the Return or Discount field as appropriate.
+            8. NUMERIC FORMATS: Interpret numbers in parentheses like (123.45) as potentially negative or credit values if the schema field implies a deduction (like Discount/Return). Also recognize that handwritten values ending in '/-' (e.g., 1600/-) are numeric total amounts.
+            9. PRIORITY FOR EXPLICIT HANDWRITTEN LABELS: If you see handwritten text that explicitly labels a value (e.g., 'Total = 343400/-' or 'Return = 1600/-'), this EXPLICIT label-value pair takes absolute priority over any printed data or other inferred values.
+            10. NUMERIC ID PRECISION (NTN, STRN, GST): Extract these IDs as LITERAL STRINGS with absolute precision. 
+               - DO NOT strip leading zeros (e.g., '0300...' MUST keep the leading '0').
+               - DO NOT skip or group digits. Count them: STRN is typically exactly 13 digits.
+               - Extract EVERY digit one-by-one. If you see '03-00-99999-56-46', read it as '0300999995646'.
+               - EXAMPLE: STRN-0300999995646 means Supplier_Registration_No = "0300999995646" (exactly 13 digits with five 9s)
+            11. IDENTICAL DIGIT SEQUENCES: For sequences of identical digits (like '99999' or '00000'), COUNT EACH DIGIT INDIVIDUALLY. Do not estimate. The number 99999 has FIVE 9s, not four. Read: nine-nine-nine-nine-nine. Verify your extracted string has the exact same length as the original.
+            12. ID FIELD IDENTIFICATION: Look for labels like 'STRN', 'NTN', 'G.S.T', or 'Sales Tax Reg No'. Map these to the registration fields even if the labels vary.
+            13. ANTI-HALLUCINATION: Strictly extract ONLY what is explicitly visible. If a value is missing or illegible, use null. Never guess or infer values.
+            14. LANGUAGE PRESERVATION: Extract text in ORIGINAL language/script (e.g., Urdu, Arabic). Do NOT translate or transliterate.
+            15. Do NOT include any explanations or text outside the JSON
+            
+            AUDITING & CONSISTENCY:
+            16. MATHEMATICAL CROSS-CHECK: Internally verify your extraction by checking if (Exclusive_Value + GST_Sales_Tax - Discount - Incentive) equals the final Net_Amount. If it doesn't match, re-scan the invoice for additional handwritten adjustments, deductions (like 'less short'), or corrections that you might have missed. 
+            17. AGGREGATE ADJUSTMENTS: If an invoice has a percentage discount (e.g., 'less 20%') AND a separate adjustment (e.g., 'less short'), SUM BOTH into the 'Discount' field to ensure the final total is mathematically correct.
+            
+            24. **VISUAL CLARITY FIELD**: For EVERY field, you must also provide a "visual_clarity" string. 
+                - Use ONLY these values: "Crisp", "Readable", "Slightly Blurry", "Very Blurry/Pixelated", or "Missing".
+            25. **VISUAL EVIDENCE REQUIREMENT (PHASE 5)**: For any field with >50% confidence, you MUST provide a "visual_evidence" string describing specific ink strokes or character features (e.g., "Sharp capital B, clear loop in P"). 
+            26. **HALLUCINATION TRAP**: Ignore your knowledge of common names or words. If you recognize name "john" but cannot see the individual characters as sharp, distinct shapes, you MUST report "Very Blurry/Pixelated" and confidence <= 20%.
+            27. Use the exact JSON structure shown in the example below with "value", "confidence", "visual_clarity", and "visual_evidence" for each field.            """
     
     # Build example with confidence structure
     example_fields = fields[:2] if len(fields) >= 2 else fields
@@ -675,8 +544,10 @@ def process_single_invoice(image, source_file, page_num, schema, session_id=None
         return None
 
 
-def process_file_parallel(file_path, filename, schema, session_id=None, max_workers=5):
+def process_file_parallel(file_path, filename, schema, session_id=None, max_workers=None):
     """Process file with multi-threading"""
+    if max_workers is None:
+        max_workers = MAX_WORKERS
     results = []
 
     try:
@@ -919,8 +790,8 @@ def upload_files():
                     ]
                     
                     # Use ThreadPoolExecutor for parallel file processing
-                    # We use max_workers=5 to match the page processing limit
-                    with ThreadPoolExecutor(max_workers=5) as executor:
+                    # We use MAX_WORKERS from environment variables
+                    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                         # Submit all file processing tasks
                         future_to_file = {
                             executor.submit(
