@@ -367,12 +367,14 @@ function processFiles() {
 }
 
 function startProgressPolling(sessionId) {
+  let lastPercentage = 0;
+
   const pollInterval = setInterval(() => {
     $.ajax({
       url: `/api/progress/${sessionId}`,
       type: "GET",
       success: function (status) {
-        if (status.error) {
+        if (status.error && !status.completed) {
           clearInterval(pollInterval);
           showAlert("danger", status.error);
           $("#progressSection").hide();
@@ -381,6 +383,11 @@ function startProgressPolling(sessionId) {
         }
 
         const percentage = status.percentage !== undefined ? status.percentage : 0;
+
+        // Smooth animation - increment gradually towards target
+        if (percentage > lastPercentage) {
+          lastPercentage = percentage;
+        }
 
         updateProgress(
           percentage,
@@ -391,6 +398,8 @@ function startProgressPolling(sessionId) {
 
         if (status.completed) {
           clearInterval(pollInterval);
+          // Ensure we show 100%
+          updateProgress(100, status.total, status.total, "Complete!");
           if (status.error) {
             showAlert("danger", "Processing error: " + status.error);
           } else {
@@ -406,7 +415,7 @@ function startProgressPolling(sessionId) {
         $("#processBtn").prop("disabled", false);
       }
     });
-  }, 1000);
+  }, 500); // Poll every 500ms for smoother updates
 }
 
 // ======================

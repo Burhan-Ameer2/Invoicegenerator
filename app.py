@@ -95,24 +95,28 @@ def init_db():
         # Seed initial data if table is empty
         if SchemaField.query.count() == 0:
             initial_fields = [
-                ("Invoice_Date", "The date mentioned on the invoice in YYYY-MM-DD format"),
-                ("Invoice_No", "The unique invoice number or reference number"),
-                ("Supplier_Name", "The name of the company or person providing the goods or service"),
-                ("Supplier_NTN", "National Tax Number of the supplier"),
-                ("Supplier_GST_No", "GST Registration Number of the supplier (often labeled as STRN or G.S.T)"),
-                ("Supplier_Registration_No", "Company registration number or STRN of the supplier"),
-                ("Buyer_Name", "The name of the customer or recipient"),
-                ("Buyer_NTN", "National Tax Number of the buyer"),
-                ("Buyer_GST_No", "GST Registration Number of the buyer (often labeled as STRN or G.S.T)"),
-                ("Buyer_Registration_No", "Company registration number or STRN of the buyer"),
-                ("Exclusive_Value", "The base amount before taxes"),
-                ("GST_Sales_Tax", "The amount of Sales Tax or GST applied"),
-                ("Inclusive_Value", "The total amount including taxes"),
-                ("Advance_Tax", "Any withholding or advance tax mentioned"),
-                ("Net_Amount", "The final payable amount"),
-                ("Discount", "Total discount amount applied"),
-                ("Incentive", "Any incentive or bonus mentioned"),
-                ("Location", "Physical location or city mentioned on the invoice")
+                ("Invoice_Date", "Date on which invoice is issued"),
+                ("Invoice_No", "Unique invoice number issued by supplier"),
+                ("Supplier_Name", "Registered name of supplier"),
+                ("Supplier_NTN", "Supplier National Tax Number"),
+                ("Supplier_GST_No", "Supplier STRN (if registered)"),
+                ("Supplier_Registration_No", "CNIC of Individual Business Owner"),
+                ("Buyer_Name", "Registered buyer name"),
+                ("Buyer_NTN", "Buyer National Tax Number"),
+                ("Buyer_GST_No", "Buyer STRN (if registered)"),
+                ("Buyer_Registration_No", "Buyer internal or external registration number"),
+                ("Exclusive_Value", "Invoice value excluding sales tax"),
+                ("GST_Sales_Tax", "Sales tax charged on exclusive value"),
+                ("Inclusive_Value", "Total value including GST"),
+                ("Advance_Tax", "Withholding / advance income tax deducted"),
+                ("Net_Amount", "Final payable/receivable amount"),
+                ("Return", "Value of goods returned"),
+                ("Discount", "Trade/commercial discount"),
+                ("Incentive", "Rebate or promotional incentive"),
+                ("Location", "Branch / store / warehouse location"),
+                ("Short", "Value/quantity short at delivery"),
+                ("Less_Stock", "Stock variance or adjustment"),
+                ("GRN", "Goods Receipt Note number")
             ]
             for name, desc in initial_fields:
                 db.session.add(SchemaField(name=name, description=desc))
@@ -146,7 +150,7 @@ MAX_TRIAL_INVOICES = int(os.getenv('MAX_TRIAL_INVOICES', 1000))
 logger.info(f"Max trial invoices: {MAX_TRIAL_INVOICES}")
 
 # Get max parallel workers for processing
-MAX_WORKERS = int(os.getenv('MAX_WORKERS', 5))
+MAX_WORKERS = int(os.getenv('MAX_WORKERS', 10))
 logger.info(f"Max parallel workers: {MAX_WORKERS}")
 
 # INVOICE_SCHEMA is now dynamic and stored in the database
@@ -188,10 +192,10 @@ class RateLimiter:
             # Record this call
             self.calls.append(time.time())
 
-# Global rate limiter (50 calls per minute - allows parallel processing)
-# Gemini 1.5 Flash free tier: 15 RPM, 1500 RPD, 1 million TPM
-# Setting to 50 allows burst processing but will throttle if needed
-rate_limiter = RateLimiter(max_calls_per_minute=50)
+# Global rate limiter
+# Gemini 2.5 Flash paid tier: 1000 RPM, 10K RPD, 1M TPM
+# Setting to 500 RPM with buffer for safety
+rate_limiter = RateLimiter(max_calls_per_minute=500)
 
 # Global storage for processed invoices with disk persistence
 processed_invoices = {}
@@ -292,16 +296,28 @@ def get_session_data(session_id):
         return None
 
 
-def pdf_to_images(pdf_bytes):
-    """Convert PDF bytes to list of images using PyMuPDF"""
+def pdf_to_images(pdf_bytes, session_id=None):
+    """Convert PDF bytes to list of images using PyMuPDF with progress updates"""
     try:
         pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
         images = []
-        for page_num in range(len(pdf_document)):
+        total_pages = len(pdf_document)
+
+        for page_num in range(total_pages):
             page = pdf_document[page_num]
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            pix = page.get_pixmap()  # Native resolution - faster, Gemini handles it fine
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             images.append(img)
+
+            # Update progress during PDF conversion (20-30% range)
+            if session_id:
+                with processing_status_lock:
+                    if session_id in processing_status:
+                        # PDF conversion takes 20-30% of progress
+                        conversion_progress = 20 + int(((page_num + 1) / total_pages) * 10)
+                        processing_status[session_id]['percentage'] = conversion_progress
+                        processing_status[session_id]['message'] = f"Converting PDF page {page_num + 1} of {total_pages}..."
+
         pdf_document.close()
         logger.info(f"Successfully converted PDF to {len(images)} images")
         return images
@@ -489,14 +505,14 @@ def process_single_invoice(image, source_file, page_num, schema, session_id=None
                 with processing_status_lock:
                     if session_id in processing_status:
                         processing_status[session_id]['processed'] += 1
-                        # Update percentage (assuming 20-100 range for processing)
+                        # Update percentage (30-100 range for API processing)
+                        # 0-20%: upload, 20-30%: PDF conversion, 30-100%: API extraction
                         total = processing_status[session_id]['total']
                         processed = processing_status[session_id]['processed']
                         if total > 0:
-                            # 20% for upload, 80% for processing
-                            percentage = 20 + int((processed / total) * 80)
+                            percentage = 30 + int((processed / total) * 70)
                             processing_status[session_id]['percentage'] = min(100, percentage)
-                            processing_status[session_id]['message'] = f"Processing invoice {processed} of {total}..."
+                            processing_status[session_id]['message'] = f"Extracting invoice {processed} of {total}..."
 
             return extracted_data
         else:
@@ -528,7 +544,7 @@ def process_file_parallel(file_path, filename, schema, session_id=None, max_work
         if file_extension == 'pdf':
             with open(file_path, 'rb') as f:
                 pdf_bytes = f.read()
-            images = pdf_to_images(pdf_bytes)
+            images = pdf_to_images(pdf_bytes, session_id)
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {
@@ -548,7 +564,13 @@ def process_file_parallel(file_path, filename, schema, session_id=None, max_work
                     if result:
                         results.append(result)
         else:
-            # Process image file
+            # Process single image file
+            if session_id:
+                with processing_status_lock:
+                    if session_id in processing_status:
+                        processing_status[session_id]['percentage'] = 30
+                        processing_status[session_id]['message'] = f"Extracting {filename}..."
+
             image = Image.open(file_path)
             result = process_single_invoice(image, filename, 1, schema, session_id)
             if result:
@@ -739,10 +761,10 @@ def upload_files():
         # Initialize processing status
         with processing_status_lock:
             processing_status[session_id] = {
-                'percentage': 20, # Started after upload
+                'percentage': 20,  # Upload complete
                 'processed': 0,
                 'total': total_invoice_count,
-                'message': 'Starting extraction...',
+                'message': 'Preparing files...',
                 'completed': False
             }
 
